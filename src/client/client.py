@@ -358,3 +358,35 @@ class AgentClient:
             raise AgentClientError(f"Error: {e}")
 
         return ChatHistory.model_validate(response.json())
+
+    def list_conversations(self, user_id: str) -> list[dict]:
+        """
+        Get all conversations for a user.
+        """
+        try:
+            response = httpx.get(
+                f"{self.base_url}/conversations",
+                params={"user_id": user_id},
+                headers=self._headers,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as e:
+            raise AgentClientError(f"Error getting conversations: {e}")
+
+    def get_conversation(self, thread_id: str, user_id: str) -> list[dict]:
+        """
+        Get all messages for a conversation (thread).
+        """
+        try:
+            response = httpx.get(
+                f"{self.base_url}/conversations/{thread_id}",
+                params={"user_id": user_id},
+                headers=self._headers,
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPError as e:
+            raise AgentClientError(f"Error getting conversation: {e}")

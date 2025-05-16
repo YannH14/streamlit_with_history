@@ -3,7 +3,7 @@ from typing import Any, Literal, NotRequired
 from pydantic import BaseModel, Field, SerializeAsAny
 from typing_extensions import TypedDict
 
-from schema.models import AllModelEnum, AnthropicModelName, OpenAIModelName
+from schema.models import AllModelEnum, OpenAIModelName
 
 
 class AgentInfo(BaseModel):
@@ -48,7 +48,7 @@ class UserInput(BaseModel):
         title="Model",
         description="LLM Model to use for the agent.",
         default=OpenAIModelName.GPT_4O_MINI,
-        examples=[OpenAIModelName.GPT_4O_MINI, AnthropicModelName.HAIKU_35],
+        examples=[OpenAIModelName.GPT_4O_MINI],
     )
     thread_id: str | None = Field(
         description="Thread ID to persist and continue a multi-turn conversation.",

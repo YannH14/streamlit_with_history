@@ -6,9 +6,9 @@ from langchain_core.runnables import RunnableConfig
 
 load_dotenv()
 
-from agents import DEFAULT_AGENT, get_agent  # noqa: E402
+from agents.smol_agents import get_agent
 
-agent = get_agent(DEFAULT_AGENT)
+agent = get_agent()
 
 
 async def main() -> None:
