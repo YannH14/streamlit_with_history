@@ -1,23 +1,36 @@
-import inspect
+# fastapi_smolagents_app.py
+"""
+FastAPI service powered by **smolagents** – v3.1
+================================================
+Adds **persistent chat history** (conversations + messages) and feedback tracking via PostgreSQL **using UUID primary keys** and
+**AI‑generated conversation titles** with a graceful heuristic fallback.
+
+Environment variables:
+* `DATABASE_URL` – Postgres connection string (optional; disables persistence if absent).
+* `OPENAI_API_KEY`, `OPENAI_MODEL_ID` – control LLM routing.
+* `AUTH_SECRET` – bearer token for authenticated routes.
+"""
+from __future__ import annotations
+
+import asyncio
+import datetime as _dt
 import json
 import logging
+import os
 import warnings
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any
+from typing import Annotated, Any, Dict
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, FastAPI, HTTPException, status
+import asyncpg
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from langchain_core._api import LangChainBetaWarning
-from langchain_core.messages import AIMessage, AIMessageChunk, AnyMessage, HumanMessage, ToolMessage
-from langchain_core.runnables import RunnableConfig
-from langgraph.pregel import Pregel
-from langgraph.types import Command, Interrupt
-from langsmith import Client as LangsmithClient
+from smolagents import CodeAgent
 
-from agents import DEFAULT_AGENT, get_agent, get_all_agent_info
+# Local imports --------------------------------------------------------
+from agents.smol_agents import DEFAULT_AGENT, get_agent, get_all_agent_info
 from core import settings
 from memory import initialize_database, initialize_store
 from schema import (
@@ -30,67 +43,227 @@ from schema import (
     StreamInput,
     UserInput,
 )
-from service.utils import (
-    convert_message_content_to_string,
-    langchain_to_chat_message,
-    remove_tool_calls,
-)
 
-warnings.filterwarnings("ignore", category=LangChainBetaWarning)
+# Optional AI summariser (non‑critical)
+try:
+    from agents.summarizer import summarize_title  # noqa: WPS433 – optional runtime import
+except Exception:  # pragma: no cover
+    summarize_title = None  # type: ignore  # noqa: WPS410
+
+warnings.filterwarnings("ignore", category=UserWarning)
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------
+# Database pool – single pool for conversations, messages, feedback
+# ---------------------------------------------------------------------
+
+_DB_POOL: asyncpg.Pool | None = None
+
+_SCHEMA_SQL = """
+CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+
+CREATE TABLE IF NOT EXISTS conversations (
+    thread_id   UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id     TEXT NOT NULL,
+    title       TEXT NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_convos_user ON conversations(user_id);
+
+CREATE TABLE IF NOT EXISTS chat_messages (
+    id          BIGSERIAL PRIMARY KEY,
+    thread_id   UUID REFERENCES conversations(thread_id) ON DELETE CASCADE,
+    sender_type TEXT CHECK (sender_type IN ('human', 'ai')) NOT NULL,
+    content     TEXT NOT NULL,
+    ts          TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_msgs_thread ON chat_messages(thread_id);
+
+CREATE TABLE IF NOT EXISTS feedback (
+    id       BIGSERIAL PRIMARY KEY,
+    run_id   TEXT,
+    key      TEXT,
+    score    DOUBLE PRECISION,
+    meta     JSONB,
+    ts       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+"""
+
+
+async def _init_db_pool() -> None:
+    """Initialise asyncpg pool and ensure schema is present."""
+    global _DB_POOL  # noqa: WPS420 – single shared pool
+    database_url = os.getenv("DATABASE_URL")
+    if not database_url:
+        logger.info("DATABASE_URL not set – persistence disabled")
+        return
+
+    try:
+        _DB_POOL = await asyncpg.create_pool(database_url, min_size=1, max_size=10)
+        async with _DB_POOL.acquire() as conn:
+            await conn.execute(_SCHEMA_SQL)
+        logger.info("Database schema ready (%s)", database_url)
+    except Exception as exc:  # pragma: no cover – startup failure is non‑fatal
+        logger.warning("Cannot initialise database (%s) – persistence disabled", exc)
+        _DB_POOL = None
+
+
+async def _close_db_pool() -> None:  # noqa: WPS430 – symmetrical teardown
+    if _DB_POOL:
+        await _DB_POOL.close()
+
+
+# ---------------------------------------------------------------------
+# Conversation helpers
+# ---------------------------------------------------------------------
+
+_MAX_TITLE_WORDS = 10
+
+
+def _heuristic_title(msg: str) -> str:
+    """Simple first‑N‑words fallback."""
+    words = msg.split()
+    base = " ".join(words[:_MAX_TITLE_WORDS])
+    return base + (" …" if len(words) > _MAX_TITLE_WORDS else "")
+
+
+async def _generate_title(msg: str) -> str:  # noqa: WPS231 – small helper
+    """Try AI summarisation, fall back to heuristic."""
+    if summarize_title:
+        try:
+            if asyncio.iscoroutinefunction(summarize_title):
+                title = await summarize_title(msg)
+            else:  # type: ignore[func-returns-value]
+                loop = asyncio.get_running_loop()
+                title = await loop.run_in_executor(None, summarize_title, msg)
+            if title:
+                return title.strip()[:120]
+        except Exception as exc:  # pragma: no cover
+            logger.info("summarize_title failed, falling back (%s)", exc)
+    return _heuristic_title(msg)
+
+
+async def _conversation_exists(thread_id: UUID) -> bool:
+    if not _DB_POOL:
+        return False
+    async with _DB_POOL.acquire() as conn:
+        return (
+            await conn.fetchval(
+                "SELECT 1 FROM conversations WHERE thread_id=$1", thread_id
+            )
+            is not None
+        )
+
+
+async def _upsert_conversation(thread_id: UUID, user_id: str, first_user_msg: str) -> None:  # noqa: E501
+    if not _DB_POOL:
+        return
+    title = await _generate_title(first_user_msg)
+    async with _DB_POOL.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO conversations(thread_id, user_id, title)
+            VALUES($1, $2, $3)
+            ON CONFLICT(thread_id)
+            DO UPDATE SET updated_at = NOW()
+            """,
+            thread_id,
+            user_id,
+            title,
+        )
+
+
+async def _insert_message(thread_id: UUID, sender: str, content: str) -> None:
+    if not _DB_POOL:
+        return
+    async with _DB_POOL.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO chat_messages(thread_id, sender_type, content) VALUES($1,$2,$3)",
+            thread_id,
+            sender,
+            content,
+        )
+        await conn.execute(
+            "UPDATE conversations SET updated_at = NOW() WHERE thread_id=$1",
+            thread_id,
+        )
+
+
+# ---------------------------------------------------------------------
+# Helpers: run smolagents in thread, token streaming
+# ---------------------------------------------------------------------
+
+async def _run_agent(agent: CodeAgent, task: str) -> str:  # noqa: WPS110 – third‑party name
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, agent.run, task)
+
+
+def _yield_tokens(text: str):  # noqa: WPS110 – generator helper
+    for tok in text.split():
+        yield tok + " "
+
+
+async def _stream_tokens(answer: str):
+    for tkn in _yield_tokens(answer):
+        yield tkn
+        await asyncio.sleep(0)  # allow event loop switch
+
+
+# ---------------------------------------------------------------------
+# Auth helper
+# ---------------------------------------------------------------------
 
 def verify_bearer(
     http_auth: Annotated[
         HTTPAuthorizationCredentials | None,
-        Depends(HTTPBearer(description="Please provide AUTH_SECRET api key.", auto_error=False)),
+        Depends(
+            HTTPBearer(
+                description="Provide AUTH_SECRET bearer token.", auto_error=False
+            )
+        ),
     ],
 ) -> None:
-    if not settings.AUTH_SECRET:
-        return
-    auth_secret = settings.AUTH_SECRET.get_secret_value()
-    if not http_auth or http_auth.credentials != auth_secret:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
+    """Simple constant secret check."""
+    if settings.AUTH_SECRET:
+        if not http_auth or http_auth.credentials != settings.AUTH_SECRET.get_secret_value():
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
 
+
+# ---------------------------------------------------------------------
+# FastAPI lifecycle
+# ---------------------------------------------------------------------
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """
-    Configurable lifespan that initializes the appropriate database checkpointer and store
-    based on settings.
-    """
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: WPS430 – FP style
+    await _init_db_pool()
     try:
-        # Initialize both checkpointer (for short-term memory) and store (for long-term memory)
-        async with initialize_database() as saver, initialize_store() as store:
-            # Set up both components
-            if hasattr(saver, "setup"):  # ignore: union-attr
-                await saver.setup()
-            # Only setup store for Postgres as InMemoryStore doesn't need setup
-            if hasattr(store, "setup"):  # ignore: union-attr
-                await store.setup()
-
-            # Configure agents with both memory components
-            agents = get_all_agent_info()
-            for a in agents:
-                agent = get_agent(a.key)
-                # Set checkpointer for thread-scoped memory (conversation history)
-                agent.checkpointer = saver
-                # Set store for long-term memory (cross-conversation knowledge)
-                agent.store = store
+        async with initialize_database() as saver, initialize_store() as store:  # noqa: WPS440 – contextlib nesting
+            if hasattr(saver, "setup"):
+                await saver.setup()  # type: ignore[attr-defined]
+            if hasattr(store, "setup"):
+                await store.setup()  # type: ignore[attr-defined]
+            for info in get_all_agent_info():
+                ag = get_agent(info.key)
+                ag.checkpointer = saver  # type: ignore[attr-defined]
+                ag.store = store  # type: ignore[attr-defined]
             yield
-    except Exception as e:
-        logger.error(f"Error during database/store initialization: {e}")
-        raise
+    except Exception as exc:  # pragma: no cover – fallback to memory‑only
+        logger.warning("Memory DB unavailable – in‑memory only (%s)", exc)
+        yield
+    await _close_db_pool()
 
 
 app = FastAPI(lifespan=lifespan)
 router = APIRouter(dependencies=[Depends(verify_bearer)])
 
+# ---------------------------------------------------------------------
+# Routes: info, conversations
+# ---------------------------------------------------------------------
 
-@router.get("/info")
-async def info() -> ServiceMetadata:
-    models = list(settings.AVAILABLE_MODELS)
-    models.sort()
+@router.get("/info", response_model=ServiceMetadata)
+async def info() -> ServiceMetadata:  # noqa: D401 – FastAPI returns models
+    models = sorted(settings.AVAILABLE_MODELS)
     return ServiceMetadata(
         agents=get_all_agent_info(),
         models=models,
@@ -99,288 +272,173 @@ async def info() -> ServiceMetadata:
     )
 
 
-async def _handle_input(user_input: UserInput, agent: Pregel) -> tuple[dict[str, Any], UUID]:
-    """
-    Parse user input and handle any required interrupt resumption.
-    Returns kwargs for agent invocation and the run_id.
-    """
-    run_id = uuid4()
-    thread_id = user_input.thread_id or str(uuid4())
-    user_id = user_input.user_id or str(uuid4())
-
-    configurable = {"thread_id": thread_id, "model": user_input.model, "user_id": user_id}
-
-    if user_input.agent_config:
-        if overlap := configurable.keys() & user_input.agent_config.keys():
-            raise HTTPException(
-                status_code=422,
-                detail=f"agent_config contains reserved keys: {overlap}",
-            )
-        configurable.update(user_input.agent_config)
-
-    config = RunnableConfig(
-        configurable=configurable,
-        run_id=run_id,
-    )
-
-    # Check for interrupts that need to be resumed
-    state = await agent.aget_state(config=config)
-    interrupted_tasks = [
-        task for task in state.tasks if hasattr(task, "interrupts") and task.interrupts
+@router.get("/conversations")
+async def list_conversations(user_id: str = Query(...)) -> list[Dict[str, Any]]:  # noqa: WPS211 – simple SQL
+    if not _DB_POOL:
+        return []
+    async with _DB_POOL.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT thread_id, title, updated_at
+              FROM conversations
+             WHERE user_id=$1
+         ORDER BY updated_at DESC
+            """,
+            user_id,
+        )
+    return [
+        {
+            "thread_id": str(r["thread_id"]),
+            "title": r["title"],
+            "updated_at": r["updated_at"],
+        }
+        for r in rows
     ]
 
-    input: Command | dict[str, Any]
-    if interrupted_tasks:
-        # assume user input is response to resume agent execution from interrupt
-        input = Command(resume=user_input.message)
-    else:
-        input = {"messages": [HumanMessage(content=user_input.message)]}
 
-    kwargs = {
-        "input": input,
-        "config": config,
-    }
+@router.get("/conversations/{thread_id}")
+async def get_conversation(
+    thread_id: UUID, user_id: str = Query(...)
+) -> list[Dict[str, Any]]:
+    if not _DB_POOL:
+        return []
+    async with _DB_POOL.acquire() as conn:
+        owner = await conn.fetchval(
+            "SELECT user_id FROM conversations WHERE thread_id=$1", thread_id
+        )
+        if owner != user_id:
+            raise HTTPException(status_code=403, detail="Not your conversation")
+        msgs = await conn.fetch(
+            """
+            SELECT sender_type, content, ts
+              FROM chat_messages
+             WHERE thread_id=$1
+         ORDER BY ts
+            """,
+            thread_id,
+        )
+    return [
+        {"type": r["sender_type"], "content": r["content"], "timestamp": r["ts"]}
+        for r in msgs
+    ]
 
-    return kwargs, run_id
 
+# ---------------------------------------------------------------------
+# Input helper
+# ---------------------------------------------------------------------
+
+async def _handle_input(user_input: UserInput) -> tuple[str, UUID]:  # noqa: WPS110 – domain term
+    return user_input.message, uuid4()
+
+
+# ---------------------------------------------------------------------
+# Invoke & stream (persisted)
+# ---------------------------------------------------------------------
 
 @router.post("/{agent_id}/invoke")
 @router.post("/invoke")
-async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMessage:
-    """
-    Invoke an agent with user input to retrieve a final response.
+async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMessage:  # noqa: WPS211 – sequential flow
+    message, run_id = await _handle_input(user_input)
+    thread_id = UUID(user_input.thread_id) if user_input.thread_id else uuid4()
+    user_id = user_input.user_id or ""
 
-    If agent_id is not provided, the default agent will be used.
-    Use thread_id to persist and continue a multi-turn conversation. run_id kwarg
-    is also attached to messages for recording feedback.
-    Use user_id to persist and continue a conversation across multiple threads.
-    """
-    # NOTE: Currently this only returns the last message or interrupt.
-    # In the case of an agent outputting multiple AIMessages (such as the background step
-    # in interrupt-agent, or a tool step in research-assistant), it's omitted. Arguably,
-    # you'd want to include it. You could update the API to return a list of ChatMessages
-    # in that case.
-    agent: Pregel = get_agent(agent_id)
-    kwargs, run_id = await _handle_input(user_input, agent)
+    # Ensure conversation row exists, then persist user message
+    if not await _conversation_exists(thread_id):
+        await _upsert_conversation(thread_id, user_id, message)
+    await _insert_message(thread_id, "human", message)
+
+    # Call agent
+    agent = get_agent(agent_id)
     try:
-        response_events: list[tuple[str, Any]] = await agent.ainvoke(**kwargs, stream_mode=["updates", "values"])  # type: ignore # fmt: skip
-        response_type, response = response_events[-1]
-        if response_type == "values":
-            # Normal response, the agent completed successfully
-            output = langchain_to_chat_message(response["messages"][-1])
-        elif response_type == "updates" and "__interrupt__" in response:
-            # The last thing to occur was an interrupt
-            # Return the value of the first interrupt as an AIMessage
-            output = langchain_to_chat_message(
-                AIMessage(content=response["__interrupt__"][0].value)
-            )
-        else:
-            raise ValueError(f"Unexpected response type: {response_type}")
+        answer = await _run_agent(agent, message)
+    except Exception as exc:  # pragma: no cover – propagate nicely
+        logger.exception("Agent error: %s", exc)
+        raise HTTPException(status_code=500, detail="Agent execution error")
 
-        output.run_id = str(run_id)
-        return output
-    except Exception as e:
-        logger.error(f"An exception occurred: {e}")
-        raise HTTPException(status_code=500, detail="Unexpected error")
+    # Persist assistant message
+    await _insert_message(thread_id, "ai", answer)
+    return ChatMessage(type="ai", content=answer, run_id=str(run_id))
 
 
-async def message_generator(
-    user_input: StreamInput, agent_id: str = DEFAULT_AGENT
-) -> AsyncGenerator[str, None]:
-    """
-    Generate a stream of messages from the agent.
+@router.post("/{agent_id}/stream", response_class=StreamingResponse)
+@router.post("/stream", response_class=StreamingResponse)
+async def stream(user_input: StreamInput, agent_id: str = DEFAULT_AGENT) -> StreamingResponse:  # noqa: WPS211 – generator route
+    message = user_input.message
+    thread_id = UUID(user_input.thread_id) if user_input.thread_id else uuid4()
+    user_id = user_input.user_id or ""
 
-    This is the workhorse method for the /stream endpoint.
-    """
-    agent: Pregel = get_agent(agent_id)
-    kwargs, run_id = await _handle_input(user_input, agent)
+    if not await _conversation_exists(thread_id):
+        await _upsert_conversation(thread_id, user_id, message)
+    await _insert_message(thread_id, "human", message)
 
-    try:
-        # Process streamed events from the graph and yield messages over the SSE stream.
-        async for stream_event in agent.astream(
-            **kwargs, stream_mode=["updates", "messages", "custom"]
-        ):
-            if not isinstance(stream_event, tuple):
-                continue
-            stream_mode, event = stream_event
-            new_messages = []
-            if stream_mode == "updates":
-                for node, updates in event.items():
-                    # A simple approach to handle agent interrupts.
-                    # In a more sophisticated implementation, we could add
-                    # some structured ChatMessage type to return the interrupt value.
-                    if node == "__interrupt__":
-                        interrupt: Interrupt
-                        for interrupt in updates:
-                            new_messages.append(AIMessage(content=interrupt.value))
-                        continue
-                    updates = updates or {}
-                    update_messages = updates.get("messages", [])
-                    # special cases for using langgraph-supervisor library
-                    if node == "supervisor":
-                        # Get only the last AIMessage since supervisor includes all previous messages
-                        ai_messages = [msg for msg in update_messages if isinstance(msg, AIMessage)]
-                        if ai_messages:
-                            update_messages = [ai_messages[-1]]
-                    if node in ("research_expert", "math_expert"):
-                        # By default the sub-agent output is returned as an AIMessage.
-                        # Convert it to a ToolMessage so it displays in the UI as a tool response.
-                        msg = ToolMessage(
-                            content=update_messages[0].content,
-                            name=node,
-                            tool_call_id="",
-                        )
-                        update_messages = [msg]
-                    new_messages.extend(update_messages)
+    async def event_gen():  # noqa: WPS430 – nested async generator
+        agent = get_agent(agent_id)
+        try:
+            raw_answer = await _run_agent(agent, message)
+            answer = str(raw_answer)
+        except Exception as exc:  # pragma: no cover
+            logger.exception("Stream error: %s", exc)
+            payload = {"type": "error", "content": "Internal server error"}
+            yield f"data: {json.dumps(payload)}\n\n"
+            yield "data: [DONE]\n\n"
+            return
 
-            if stream_mode == "custom":
-                new_messages = [event]
+        # Stream individual tokens
+        async for tok in _stream_tokens(answer):
+            payload = {"type": "token", "content": tok}
+            yield f"data: {json.dumps(payload)}\n\n"
 
-            # LangGraph streaming may emit tuples: (field_name, field_value)
-            # e.g. ('content', <str>), ('tool_calls', [ToolCall,...]), ('additional_kwargs', {...}), etc.
-            # We accumulate only supported fields into `parts` and skip unsupported metadata.
-            # More info at: https://langchain-ai.github.io/langgraph/cloud/how-tos/stream_messages/
-            processed_messages = []
-            current_message: dict[str, Any] = {}
-            for message in new_messages:
-                if isinstance(message, tuple):
-                    key, value = message
-                    # Store parts in temporary dict
-                    current_message[key] = value
-                else:
-                    # Add complete message if we have one in progress
-                    if current_message:
-                        processed_messages.append(_create_ai_message(current_message))
-                        current_message = {}
-                    processed_messages.append(message)
-
-            # Add any remaining message parts
-            if current_message:
-                processed_messages.append(_create_ai_message(current_message))
-
-            for message in processed_messages:
-                try:
-                    chat_message = langchain_to_chat_message(message)
-                    chat_message.run_id = str(run_id)
-                except Exception as e:
-                    logger.error(f"Error parsing message: {e}")
-                    yield f"data: {json.dumps({'type': 'error', 'content': 'Unexpected error'})}\n\n"
-                    continue
-                # LangGraph re-sends the input message, which feels weird, so drop it
-                if chat_message.type == "human" and chat_message.content == user_input.message:
-                    continue
-                yield f"data: {json.dumps({'type': 'message', 'content': chat_message.model_dump()})}\n\n"
-
-            if stream_mode == "messages":
-                if not user_input.stream_tokens:
-                    continue
-                msg, metadata = event
-                if "skip_stream" in metadata.get("tags", []):
-                    continue
-                # For some reason, astream("messages") causes non-LLM nodes to send extra messages.
-                # Drop them.
-                if not isinstance(msg, AIMessageChunk):
-                    continue
-                content = remove_tool_calls(msg.content)
-                if content:
-                    # Empty content in the context of OpenAI usually means
-                    # that the model is asking for a tool to be invoked.
-                    # So we only print non-empty content.
-                    yield f"data: {json.dumps({'type': 'token', 'content': convert_message_content_to_string(content)})}\n\n"
-    except Exception as e:
-        logger.error(f"Error in message generator: {e}")
-        yield f"data: {json.dumps({'type': 'error', 'content': 'Internal server error'})}\n\n"
-    finally:
+        # Persist and send final
+        await _insert_message(thread_id, "ai", answer)
+        final = ChatMessage(type="ai", content=answer, run_id=str(uuid4()))
+        payload = {"type": "message", "content": final.model_dump()}
+        yield f"data: {json.dumps(payload)}\n\n"
         yield "data: [DONE]\n\n"
 
-
-def _create_ai_message(parts: dict) -> AIMessage:
-    sig = inspect.signature(AIMessage)
-    valid_keys = set(sig.parameters)
-    filtered = {k: v for k, v in parts.items() if k in valid_keys}
-    return AIMessage(**filtered)
+    return StreamingResponse(event_gen(), media_type="text/event-stream")
 
 
-def _sse_response_example() -> dict[int | str, Any]:
-    return {
-        status.HTTP_200_OK: {
-            "description": "Server Sent Event Response",
-            "content": {
-                "text/event-stream": {
-                    "example": "data: {'type': 'token', 'content': 'Hello'}\n\ndata: {'type': 'token', 'content': ' World'}\n\ndata: [DONE]\n\n",
-                    "schema": {"type": "string"},
-                }
-            },
-        }
-    }
-
-
-@router.post(
-    "/{agent_id}/stream",
-    response_class=StreamingResponse,
-    responses=_sse_response_example(),
-)
-@router.post("/stream", response_class=StreamingResponse, responses=_sse_response_example())
-async def stream(user_input: StreamInput, agent_id: str = DEFAULT_AGENT) -> StreamingResponse:
-    """
-    Stream an agent's response to a user input, including intermediate messages and tokens.
-
-    If agent_id is not provided, the default agent will be used.
-    Use thread_id to persist and continue a multi-turn conversation. run_id kwarg
-    is also attached to all messages for recording feedback.
-    Use user_id to persist and continue a conversation across multiple threads.
-
-    Set `stream_tokens=false` to return intermediate messages but not token-by-token.
-    """
-    return StreamingResponse(
-        message_generator(user_input, agent_id),
-        media_type="text/event-stream",
-    )
-
+# ---------------------------------------------------------------------
+# Feedback endpoint (unchanged logic, uses same pool)
+# ---------------------------------------------------------------------
 
 @router.post("/feedback")
-async def feedback(feedback: Feedback) -> FeedbackResponse:
-    """
-    Record feedback for a run to LangSmith.
-
-    This is a simple wrapper for the LangSmith create_feedback API, so the
-    credentials can be stored and managed in the service rather than the client.
-    See: https://api.smith.langchain.com/redoc#tag/feedback/operation/create_feedback_api_v1_feedback_post
-    """
-    client = LangsmithClient()
-    kwargs = feedback.kwargs or {}
-    client.create_feedback(
-        run_id=feedback.run_id,
-        key=feedback.key,
-        score=feedback.score,
-        **kwargs,
-    )
+async def feedback(feedback: Feedback) -> FeedbackResponse:  # noqa: WPS110 – domain term
+    if not _DB_POOL:
+        logger.info("/feedback ignored – no DB configured")
+        return FeedbackResponse()
+    meta_json = json.dumps(feedback.kwargs or {})
+    try:
+        await _DB_POOL.execute(
+            """
+            INSERT INTO feedback(run_id, key, score, meta, ts)
+                 VALUES($1, $2, $3, $4, $5)
+            """,
+            feedback.run_id,
+            feedback.key,
+            feedback.score,
+            meta_json,
+            _dt.datetime.utcnow(),
+        )
+    except Exception as exc:  # pragma: no cover
+        logger.error("Feedback write failed: %s", exc)
     return FeedbackResponse()
 
 
+# ---------------------------------------------------------------------
+# History route (deprecated – kept for compatibility)
+# ---------------------------------------------------------------------
+
 @router.post("/history")
-def history(input: ChatHistoryInput) -> ChatHistory:
-    """
-    Get chat history.
-    """
-    # TODO: Hard-coding DEFAULT_AGENT here is wonky
-    agent: Pregel = get_agent(DEFAULT_AGENT)
-    try:
-        state_snapshot = agent.get_state(
-            config=RunnableConfig(configurable={"thread_id": input.thread_id})
-        )
-        messages: list[AnyMessage] = state_snapshot.values["messages"]
-        chat_messages: list[ChatMessage] = [langchain_to_chat_message(m) for m in messages]
-        return ChatHistory(messages=chat_messages)
-    except Exception as e:
-        logger.error(f"An exception occurred: {e}")
-        raise HTTPException(status_code=500, detail="Unexpected error")
+def history(input: ChatHistoryInput) -> ChatHistory:  # noqa: D401 – FastAPI returns model
+    agent = get_agent(DEFAULT_AGENT)
+    steps = agent.memory.get_full_steps()  # type: ignore[attr-defined]
+    return ChatHistory(messages=[ChatMessage(type="ai", content=str(s)) for s in steps])
 
 
 @app.get("/health")
-async def health_check():
-    """Health check endpoint."""
+async def health_check():  # noqa: D401 – simple health route
     return {"status": "ok"}
 
-
+# Register router ------------------------------------------------------
 app.include_router(router)

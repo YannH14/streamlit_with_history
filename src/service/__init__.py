@@ -1,12 +1,3 @@
-from fastapi import FastAPI
-from core.db import register_events
-from .routes import conversations, users
+from service.all_app import app
 
-app = FastAPI(title="Agent Service")
-register_events(app)
-
-
-app.include_router(users.router)
-app.include_router(conversations.router)
-
-# existing routes (agent invoke, feedback …) stay unchanged
+__all__ = ["app"]
