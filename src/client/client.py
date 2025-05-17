@@ -9,13 +9,12 @@ from schema import (
     ChatHistory,
     ChatHistoryInput,
     ChatMessage,
+    Conversation,
     Feedback,
     ServiceMetadata,
     StreamInput,
     UserInput,
-    Conversation,
 )
-
 
 
 class AgentClientError(Exception):
@@ -107,7 +106,9 @@ class AgentClient:
             AnyMessage: The response from the agent
         """
         if not self.agent:
-            raise AgentClientError("No agent selected. Use update_agent() to select an agent.")
+            raise AgentClientError(
+                "No agent selected. Use update_agent() to select an agent."
+            )
         request = UserInput(message=message)
         if thread_id:
             request.thread_id = thread_id
@@ -153,7 +154,9 @@ class AgentClient:
             ChatMessage: The response from the agent
         """
         if not self.agent:
-            raise AgentClientError("No agent selected. Use update_agent() to select an agent.")
+            raise AgentClientError(
+                "No agent selected. Use update_agent() to select an agent."
+            )
         request = UserInput(message=message)
         if thread_id:
             request.thread_id = thread_id
@@ -230,7 +233,9 @@ class AgentClient:
             Generator[ChatMessage | str, None, None]: The response from the agent
         """
         if not self.agent:
-            raise AgentClientError("No agent selected. Use update_agent() to select an agent.")
+            raise AgentClientError(
+                "No agent selected. Use update_agent() to select an agent."
+            )
         request = StreamInput(message=message, stream_tokens=stream_tokens)
         if thread_id:
             request.thread_id = thread_id
@@ -287,7 +292,9 @@ class AgentClient:
             AsyncGenerator[ChatMessage | str, None]: The response from the agent
         """
         if not self.agent:
-            raise AgentClientError("No agent selected. Use update_agent() to select an agent.")
+            raise AgentClientError(
+                "No agent selected. Use update_agent() to select an agent."
+            )
         request = StreamInput(message=message, stream_tokens=stream_tokens)
         if thread_id:
             request.thread_id = thread_id
@@ -392,7 +399,7 @@ class AgentClient:
             return response.json()
         except httpx.HTTPError as e:
             raise AgentClientError(f"Error getting conversation: {e}")
-        
+
     def get_conversations(self, user_id: str) -> list[Conversation]:
         """
         List all conversations (thread_id + title) for a given user.

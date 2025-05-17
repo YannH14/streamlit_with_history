@@ -3,14 +3,10 @@ from contextlib import AbstractAsyncContextManager
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from core.settings import DatabaseType, settings
-from memory.mongodb import get_mongo_saver
 from memory.postgres import get_postgres_saver, get_postgres_store
-from memory.sqlite import get_sqlite_saver, get_sqlite_store
 
 
-def initialize_database() -> AbstractAsyncContextManager[
-    AsyncPostgresSaver
-]:
+def initialize_database() -> AbstractAsyncContextManager[AsyncPostgresSaver]:
     """
     Initialize the appropriate database checkpointer based on configuration.
     Returns an initialized AsyncCheckpointer instance.
@@ -27,8 +23,6 @@ def initialize_store():
     if settings.DATABASE_TYPE == DatabaseType.POSTGRES:
         return get_postgres_store()
     # TODO: Add Mongo store - https://pypi.org/project/langgraph-store-mongodb/
-    else:  # Default to SQLite
-        return get_sqlite_store()
 
 
 __all__ = ["initialize_database", "initialize_store"]

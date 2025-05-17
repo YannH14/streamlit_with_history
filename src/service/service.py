@@ -20,7 +20,7 @@ import os
 import warnings
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any, Dict
+from typing import Annotated, Any
 from uuid import UUID, uuid4
 
 import asyncpg
@@ -37,17 +37,19 @@ from schema import (
     ChatHistory,
     ChatHistoryInput,
     ChatMessage,
+    Conversation,
     Feedback,
     FeedbackResponse,
     ServiceMetadata,
     StreamInput,
     UserInput,
-    Conversation
 )
 
 # Optional AI summariser (non‑critical)
 try:
-    from agents.summarizer import summarize_title  # noqa: WPS433 – optional runtime import
+    from agents.summarizer import (
+        summarize_title,
+    )  # noqa: WPS433 – optional runtime import
 except Exception:  # pragma: no cover
     summarize_title = None  # type: ignore  # noqa: WPS410
 
@@ -157,7 +159,9 @@ async def _conversation_exists(thread_id: UUID) -> bool:
         )
 
 
-async def _upsert_conversation(thread_id: UUID, user_id: str, first_user_msg: str) -> None:  # noqa: E501
+async def _upsert_conversation(
+    thread_id: UUID, user_id: str, first_user_msg: str
+) -> None:  # noqa: E501
     if not _DB_POOL:
         return
     title = await _generate_title(first_user_msg)
@@ -195,7 +199,10 @@ async def _insert_message(thread_id: UUID, sender: str, content: str) -> None:
 # Helpers: run smolagents in thread, token streaming
 # ---------------------------------------------------------------------
 
-async def _run_agent(agent: CodeAgent, task: str) -> str:  # noqa: WPS110 – third‑party name
+
+async def _run_agent(
+    agent: CodeAgent, task: str
+) -> str:  # noqa: WPS110 – third‑party name
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, agent.run, task)
 
@@ -215,6 +222,7 @@ async def _stream_tokens(answer: str):
 # Auth helper
 # ---------------------------------------------------------------------
 
+
 def verify_bearer(
     http_auth: Annotated[
         HTTPAuthorizationCredentials | None,
@@ -227,7 +235,10 @@ def verify_bearer(
 ) -> None:
     """Simple constant secret check."""
     if settings.AUTH_SECRET:
-        if not http_auth or http_auth.credentials != settings.AUTH_SECRET.get_secret_value():
+        if (
+            not http_auth
+            or http_auth.credentials != settings.AUTH_SECRET.get_secret_value()
+        ):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED)
 
 
@@ -235,11 +246,17 @@ def verify_bearer(
 # FastAPI lifecycle
 # ---------------------------------------------------------------------
 
+
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: WPS430 – FP style
+async def lifespan(
+    app: FastAPI,
+) -> AsyncGenerator[None, None]:  # noqa: WPS430 – FP style
     await _init_db_pool()
     try:
-        async with initialize_database() as saver, initialize_store() as store:  # noqa: WPS440 – contextlib nesting
+        async with (
+            initialize_database() as saver,
+            initialize_store() as store,
+        ):  # noqa: WPS440 – contextlib nesting
             if hasattr(saver, "setup"):
                 await saver.setup()  # type: ignore[attr-defined]
             if hasattr(store, "setup"):
@@ -262,6 +279,7 @@ router = APIRouter()
 # Routes: info, conversations
 # ---------------------------------------------------------------------
 
+
 @router.get("/info", response_model=ServiceMetadata)
 async def info() -> ServiceMetadata:  # noqa: D401 – FastAPI returns models
     models = sorted(settings.AVAILABLE_MODELS)
@@ -274,7 +292,9 @@ async def info() -> ServiceMetadata:  # noqa: D401 – FastAPI returns models
 
 
 @router.get("/conversations")
-async def list_conversations(user_id: str = Query(...)) -> list[Dict[str, Any]]:  # noqa: WPS211 – simple SQL
+async def list_conversations(
+    user_id: str = Query(...),
+) -> list[dict[str, Any]]:  # noqa: WPS211 – simple SQL
     if not _DB_POOL:
         return []
     async with _DB_POOL.acquire() as conn:
@@ -300,7 +320,7 @@ async def list_conversations(user_id: str = Query(...)) -> list[Dict[str, Any]]:
 @router.get("/conversations/{thread_id}")
 async def get_conversation(
     thread_id: UUID, user_id: str = Query(...)
-) -> list[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     if not _DB_POOL:
         return []
     async with _DB_POOL.acquire() as conn:
@@ -328,7 +348,10 @@ async def get_conversation(
 # Input helper
 # ---------------------------------------------------------------------
 
-async def _handle_input(user_input: UserInput) -> tuple[str, UUID]:  # noqa: WPS110 – domain term
+
+async def _handle_input(
+    user_input: UserInput,
+) -> tuple[str, UUID]:  # noqa: WPS110 – domain term
     return user_input.message, uuid4()
 
 
@@ -336,9 +359,12 @@ async def _handle_input(user_input: UserInput) -> tuple[str, UUID]:  # noqa: WPS
 # Invoke & stream (persisted)
 # ---------------------------------------------------------------------
 
+
 @router.post("/{agent_id}/invoke")
 @router.post("/invoke")
-async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMessage:  # noqa: WPS211 – sequential flow
+async def invoke(
+    user_input: UserInput, agent_id: str = DEFAULT_AGENT
+) -> ChatMessage:  # noqa: WPS211 – sequential flow
     message, run_id = await _handle_input(user_input)
     thread_id = UUID(user_input.thread_id) if user_input.thread_id else uuid4()
     user_id = user_input.user_id or ""
@@ -363,7 +389,9 @@ async def invoke(user_input: UserInput, agent_id: str = DEFAULT_AGENT) -> ChatMe
 
 @router.post("/{agent_id}/stream", response_class=StreamingResponse)
 @router.post("/stream", response_class=StreamingResponse)
-async def stream(user_input: StreamInput, agent_id: str = DEFAULT_AGENT) -> StreamingResponse:  # noqa: WPS211 – generator route
+async def stream(
+    user_input: StreamInput, agent_id: str = DEFAULT_AGENT
+) -> StreamingResponse:  # noqa: WPS211 – generator route
     message = user_input.message
     thread_id = UUID(user_input.thread_id) if user_input.thread_id else uuid4()
     user_id = user_input.user_id or ""
@@ -403,8 +431,11 @@ async def stream(user_input: StreamInput, agent_id: str = DEFAULT_AGENT) -> Stre
 # Feedback endpoint (unchanged logic, uses same pool)
 # ---------------------------------------------------------------------
 
+
 @router.post("/feedback")
-async def feedback(feedback: Feedback) -> FeedbackResponse:  # noqa: WPS110 – domain term
+async def feedback(
+    feedback: Feedback,
+) -> FeedbackResponse:  # noqa: WPS110 – domain term
     if not _DB_POOL:
         logger.info("/feedback ignored – no DB configured")
         return FeedbackResponse()
@@ -468,7 +499,6 @@ async def get_conversation_messages(
     ]
 
 
-
 @router.post("/conversations", response_model=Conversation)
 async def create_conversation(user_id: str = Query(...)) -> Conversation:
     """
@@ -492,8 +522,11 @@ async def create_conversation(user_id: str = Query(...)) -> Conversation:
 # History route (deprecated – kept for compatibility)
 # ---------------------------------------------------------------------
 
+
 @router.post("/history")
-def history(input: ChatHistoryInput) -> ChatHistory:  # noqa: D401 – FastAPI returns model
+def history(
+    input: ChatHistoryInput,
+) -> ChatHistory:  # noqa: D401 – FastAPI returns model
     agent = get_agent(DEFAULT_AGENT)
     steps = agent.memory.get_full_steps()  # type: ignore[attr-defined]
     return ChatHistory(messages=[ChatMessage(type="ai", content=str(s)) for s in steps])
@@ -502,6 +535,7 @@ def history(input: ChatHistoryInput) -> ChatHistory:  # noqa: D401 – FastAPI r
 @app.get("/health")
 async def health_check():  # noqa: D401 – simple health route
     return {"status": "ok"}
+
 
 # Register router ------------------------------------------------------
 app.include_router(router)

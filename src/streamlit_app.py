@@ -1,19 +1,20 @@
-import streamlit as st
+import asyncio
+import os
 import sqlite3
 import uuid
-import os
-from datetime import datetime
-from dotenv import load_dotenv
-import asyncio
-from langchain.chat_models import ChatOpenAI
-from langchain.chains import ConversationChain
-from langchain.memory import ConversationBufferMemory
-from client import AgentClient, AgentClientError
-from schema.schema import ChatMessage,ChatHistory
-from schema.task_data import TaskData, TaskDataStatus
 from collections.abc import AsyncGenerator
+from datetime import datetime
+
+import streamlit as st
+from dotenv import load_dotenv
+from langchain.chains import ConversationChain
+from langchain.chat_models import ChatOpenAI
+from langchain.memory import ConversationBufferMemory
 from pydantic import ValidationError
 
+from client import AgentClient, AgentClientError
+from schema.schema import ChatHistory, ChatMessage
+from schema.task_data import TaskData, TaskDataStatus
 
 # Load environment variables from .env file
 load_dotenv()
@@ -24,6 +25,7 @@ APP_ICON = "🤖"
 USER_ID_COOKIE = "user_id"
 DB_PATH = "chat_database.db"
 API_KEY = os.getenv("OPENAI_API_KEY", "")
+
 
 async def draw_messages(
     messages_agen: AsyncGenerator[ChatMessage | str, None],
@@ -71,12 +73,12 @@ async def draw_messages(
             streaming_content += msg
             streaming_placeholder.write(streaming_content)
             continue
-        
+
         if not isinstance(msg, ChatMessage) and not isinstance(msg, dict):
             st.error(f"Unexpected message type: {type(msg)}")
             st.write(msg)
             st.stop()
-            
+
         if isinstance(msg, dict):
             # Convert dict to ChatMessage
             try:
@@ -85,7 +87,7 @@ async def draw_messages(
                 st.error("Unexpected message format received from agent")
                 st.write(msg)
                 st.stop()
-                
+
         match msg.type:
             # A message from the user, the easiest case
             case "human":
@@ -134,7 +136,9 @@ async def draw_messages(
                             tool_result: ChatMessage = await anext(messages_agen)
 
                             if tool_result.type != "tool":
-                                st.error(f"Unexpected ChatMessage type: {tool_result.type}")
+                                st.error(
+                                    f"Unexpected ChatMessage type: {tool_result.type}"
+                                )
                                 st.write(tool_result)
                                 st.stop()
 
@@ -188,12 +192,15 @@ async def handle_feedback() -> None:
         st.session_state.last_feedback = (None, None)
 
     print("Handling feedback...")
-    latest_run_id = st.session_state.messages[-1].get('run_id')
+    latest_run_id = st.session_state.messages[-1].get("run_id")
     print(f"Latest run ID: {latest_run_id}")
     feedback = st.feedback("stars", key=latest_run_id)
 
     # If the feedback value or run ID has changed, send a new feedback record
-    if feedback is not None and (latest_run_id, feedback) != st.session_state.last_feedback:
+    if (
+        feedback is not None
+        and (latest_run_id, feedback) != st.session_state.last_feedback
+    ):
         # Normalize the feedback value (an index) to a score between 0 and 1
         normalized_score = (feedback + 1) / 5.0
 
@@ -217,18 +224,21 @@ async def handle_feedback() -> None:
 def init_database():
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    
+
     # Users table
-    c.execute('''
+    c.execute(
+        """
     CREATE TABLE IF NOT EXISTS users (
         id TEXT PRIMARY KEY,
         username TEXT UNIQUE,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
-    ''')
-    
+    """
+    )
+
     # Conversations table
-    c.execute('''
+    c.execute(
+        """
     CREATE TABLE IF NOT EXISTS conversations (
         id TEXT PRIMARY KEY,
         user_id TEXT,
@@ -237,10 +247,12 @@ def init_database():
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users (id)
     )
-    ''')
-    
+    """
+    )
+
     # Messages table
-    c.execute('''
+    c.execute(
+        """
     CREATE TABLE IF NOT EXISTS messages (
         id TEXT PRIMARY KEY,
         conversation_id TEXT,
@@ -249,10 +261,12 @@ def init_database():
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (conversation_id) REFERENCES conversations (id)
     )
-    ''')
-    
+    """
+    )
+
     conn.commit()
     conn.close()
+
 
 # Database operations
 class ChatDatabase:
@@ -260,115 +274,110 @@ class ChatDatabase:
         self.conn = sqlite3.connect(DB_PATH)
         self.conn.row_factory = sqlite3.Row
         self.c = self.conn.cursor()
-    
+
     def close(self):
         self.conn.close()
-    
+
     def get_or_create_user(self, username):
         # Check if user exists
-        self.c.execute('SELECT * FROM users WHERE username = ?', (username,))
+        self.c.execute("SELECT * FROM users WHERE username = ?", (username,))
         user = self.c.fetchone()
-        
+
         if user:
             return dict(user)
-        
+
         # Create new user
         user_id = str(uuid.uuid4())
         self.c.execute(
-            'INSERT INTO users (id, username) VALUES (?, ?)',
-            (user_id, username)
+            "INSERT INTO users (id, username) VALUES (?, ?)", (user_id, username)
         )
         self.conn.commit()
-        
+
         return {"id": user_id, "username": username}
-    
+
     def create_conversation(self, user_id, title="New Chat"):
         conversation_id = str(uuid.uuid4())
         now = datetime.now().isoformat()
-        
+
         self.c.execute(
-            'INSERT INTO conversations (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
-            (conversation_id, user_id, title, now, now)
+            "INSERT INTO conversations (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            (conversation_id, user_id, title, now, now),
         )
         self.conn.commit()
-        
-        return {
-            "thread_id": conversation_id,
-            "title": title,
-            "created_at": now
-        }
-    
+
+        return {"thread_id": conversation_id, "title": title, "created_at": now}
+
     def list_conversations(self, user_id):
         self.c.execute(
-            '''SELECT id as thread_id, title, created_at, updated_at 
+            """SELECT id as thread_id, title, created_at, updated_at 
                FROM conversations 
                WHERE user_id = ? 
-               ORDER BY updated_at DESC''',
-            (user_id,)
+               ORDER BY updated_at DESC""",
+            (user_id,),
         )
-        
+
         return [dict(row) for row in self.c.fetchall()]
-    
+
     def get_conversation(self, thread_id, user_id=None):
         # Verify the conversation belongs to the user if user_id is provided
         if user_id:
             self.c.execute(
-                'SELECT user_id FROM conversations WHERE id = ?',
-                (thread_id,)
+                "SELECT user_id FROM conversations WHERE id = ?", (thread_id,)
             )
             owner = self.c.fetchone()
-            if not owner or owner['user_id'] != user_id:
+            if not owner or owner["user_id"] != user_id:
                 return None
-        
+
         # Get all messages for this conversation
         self.c.execute(
-            '''SELECT id ,sender, content, created_at 
+            """SELECT id ,sender, content, created_at 
                FROM messages 
                WHERE conversation_id = ? 
-               ORDER BY created_at''',
-            (thread_id,)
+               ORDER BY created_at""",
+            (thread_id,),
         )
-        
+
         return [dict(row) for row in self.c.fetchall()]
-    
-    def save_message(self, message_id,conversation_id, sender, content):
+
+    def save_message(self, message_id, conversation_id, sender, content):
         now = datetime.now().isoformat()
-        
+
         self.c.execute(
-            'INSERT INTO messages (id, conversation_id, sender, content, created_at) VALUES (?, ?, ?, ?, ?)',
-            (message_id, conversation_id, sender, content, now)
+            "INSERT INTO messages (id, conversation_id, sender, content, created_at) VALUES (?, ?, ?, ?, ?)",
+            (message_id, conversation_id, sender, content, now),
         )
-        
+
         # Update the conversation's updated_at timestamp
         self.c.execute(
-            'UPDATE conversations SET updated_at = ? WHERE id = ?',
-            (now, conversation_id)
+            "UPDATE conversations SET updated_at = ? WHERE id = ?",
+            (now, conversation_id),
         )
-        
+
         self.conn.commit()
         return message_id
-    
+
     def update_conversation_title(self, thread_id, title):
         self.c.execute(
-            'UPDATE conversations SET title = ? WHERE id = ?',
-            (title, thread_id)
+            "UPDATE conversations SET title = ? WHERE id = ?", (title, thread_id)
         )
         self.conn.commit()
-    
+
     def delete_conversation(self, thread_id):
         # Delete all messages in the conversation
-        self.c.execute('DELETE FROM messages WHERE conversation_id = ?', (thread_id,))
-        
+        self.c.execute("DELETE FROM messages WHERE conversation_id = ?", (thread_id,))
+
         # Delete the conversation
-        self.c.execute('DELETE FROM conversations WHERE id = ?', (thread_id,))
-        
+        self.c.execute("DELETE FROM conversations WHERE id = ?", (thread_id,))
+
         self.conn.commit()
+
 
 # Initialize LLM and conversation chain
 def get_llm_chain():
     llm = ChatOpenAI(api_key=API_KEY)
     memory = ConversationBufferMemory()
     return ConversationChain(llm=llm, memory=memory)
+
 
 # Helper function to convert between UI and database message formats
 def format_message_for_display(msg_dict) -> ChatMessage:
@@ -380,33 +389,34 @@ def format_message_for_display(msg_dict) -> ChatMessage:
         run_id=msg_dict["id"],
     )
 
+
 # Streamlit UI
 async def main():
     # Initialize database
     init_database()
     db = ChatDatabase()
-    
+
     # Page configuration
     st.set_page_config(
         page_title=APP_TITLE,
         page_icon=APP_ICON,
         layout="wide",
     )
-    
+
     # Initialize session state variables
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
-        st.session_state.user_info = None  
+        st.session_state.user_info = None
         st.session_state.conversations = []
         st.session_state.current_thread_id = None
         st.session_state.messages = []
         st.session_state.llm_chain = None
-    
+
     # Login screen
     if not st.session_state.logged_in:
         st.title(f"{APP_ICON} {APP_TITLE}")
         st.subheader("Login")
-        
+
         username = st.text_input("Username")
         if st.button("Login") and username:
             # Get or create user record
@@ -417,11 +427,11 @@ async def main():
             st.session_state.user_info = user_info
             st.session_state.conversations = db.list_conversations(user_info["id"])
             st.session_state.llm_chain = get_llm_chain()
-            
+
             st.rerun()
-        
+
         st.stop()
-    
+
     if "agent_client" not in st.session_state:
         load_dotenv()
         agent_url = os.getenv("AGENT_URL")
@@ -436,37 +446,46 @@ async def main():
             st.error(f"Error connecting to agent service at {agent_url}: {e}")
             st.markdown("The service might be booting up. Try again in a few seconds.")
             st.stop()
-            
-    if "thread_id" not in st.session_state:
-            thread_id = st.query_params.get("thread_id")
-            if not thread_id:
-                thread_id = str(uuid.uuid4())
-                messages = []
-            else:
-                try:
-                    messages: ChatHistory = agent_client.get_history(thread_id=thread_id).messages
-                except AgentClientError:
-                    st.error("No message history found for this Thread ID.")
-                    messages = []
-            st.session_state.messages = messages
-            st.session_state.thread_id = thread_id    
-    
+
     agent_client: AgentClient = st.session_state.agent_client
-    
+
+    if "thread_id" not in st.session_state:
+        thread_id = st.query_params.get("thread_id")
+        if not thread_id:
+            thread_id = str(uuid.uuid4())
+            messages = []
+        else:
+            try:
+                messages: ChatHistory = agent_client.get_history(
+                    thread_id=thread_id
+                ).messages
+            except AgentClientError:
+                st.error("No message history found for this Thread ID.")
+                messages = []
+        st.session_state.messages = messages
+        st.session_state.thread_id = thread_id
+
     # Main app layout
     st.title(f"{APP_ICON} {APP_TITLE}")
-    
+
     # Sidebar
     with st.sidebar:
         st.header(f"👤 {st.session_state.user_info['username']}")
-        
+
         # Logout button
         if st.button("🚪 Log out", use_container_width=True):
-            for key in ["logged_in", "user_info", "conversations", "current_thread_id", "messages", "llm_chain"]:
+            for key in [
+                "logged_in",
+                "user_info",
+                "conversations",
+                "current_thread_id",
+                "messages",
+                "llm_chain",
+            ]:
                 if key in st.session_state:
                     del st.session_state[key]
             st.rerun()
-        
+
         # New chat button
         if st.button("➕ New Chat", use_container_width=True):
             new_conv = db.create_conversation(st.session_state.user_info["id"])
@@ -475,10 +494,12 @@ async def main():
             st.session_state.messages = []
             st.session_state.llm_chain = get_llm_chain()  # Reset conversation memory
             st.rerun()
-            
+
         with st.popover(":material/settings: Settings", use_container_width=True):
             model_idx = agent_client.info.models.index(agent_client.info.default_model)
-            model = st.selectbox("LLM to use", options=agent_client.info.models, index=model_idx)
+            model = st.selectbox(
+                "LLM to use", options=agent_client.info.models, index=model_idx
+            )
             agent_list = [a.key for a in agent_client.info.agents]
             agent_idx = agent_list.index(agent_client.info.default_agent)
             agent_client.agent = st.selectbox(
@@ -489,52 +510,75 @@ async def main():
             use_streaming = st.toggle("Stream results", value=True)
 
             # Display user ID (for debugging or user information)
-            st.text_input("User ID (read-only)", value=st.session_state.user_info["id"], disabled=True)
+            st.text_input(
+                "User ID (read-only)",
+                value=st.session_state.user_info["id"],
+                disabled=True,
+            )
         st.divider()
-        
+
         # List existing conversationss
         if st.session_state.conversations:
             st.subheader("Your Chats")
-            
+
             for i, conv in enumerate(st.session_state.conversations):
                 title = conv["title"] or "Untitled Chat"
-                if st.sidebar.button(f"{title}", key=f"convo_{i}", use_container_width=True):
+                if st.sidebar.button(
+                    f"{title}", key=f"convo_{i}", use_container_width=True
+                ):
                     st.session_state.current_thread_id = conv["thread_id"]
-                    messages = db.get_conversation(conv["thread_id"], st.session_state.user_info["id"])
-                    st.session_state.messages = [format_message_for_display(msg) for msg in messages]
-                    st.session_state.llm_chain = get_llm_chain()  # Reset conversation memory
-                    
+                    messages = db.get_conversation(
+                        conv["thread_id"], st.session_state.user_info["id"]
+                    )
+                    st.session_state.messages = [
+                        format_message_for_display(msg) for msg in messages
+                    ]
+                    st.session_state.llm_chain = (
+                        get_llm_chain()
+                    )  # Reset conversation memory
+
                     # Load conversation history into the LLM memory
                     for msg in messages:
                         if msg["sender"] == "User":
-                            st.session_state.llm_chain.memory.chat_memory.add_user_message(msg["content"])
+                            st.session_state.llm_chain.memory.chat_memory.add_user_message(
+                                msg["content"]
+                            )
                         else:
-                            st.session_state.llm_chain.memory.chat_memory.add_ai_message(msg["content"])
-                    
+                            st.session_state.llm_chain.memory.chat_memory.add_ai_message(
+                                msg["content"]
+                            )
+
                     st.rerun()
-                
+
                 # Delete button with confirmation
                 with st.sidebar.expander("Delete", expanded=False):
-                    if st.button("Confirm Delete", key=f"delete_{i}", use_container_width=True):
+                    if st.button(
+                        "Confirm Delete", key=f"delete_{i}", use_container_width=True
+                    ):
                         db.delete_conversation(conv["thread_id"])
                         st.session_state.conversations.pop(i)
                         if st.session_state.current_thread_id == conv["thread_id"]:
                             st.session_state.current_thread_id = None
                             st.session_state.messages = []
                         st.rerun()
-    
+
     # Main chat area
     if not st.session_state.current_thread_id:
-        st.info("Select 'New Chat' or choose an existing conversation from the sidebar.")
+        st.info(
+            "Select 'New Chat' or choose an existing conversation from the sidebar."
+        )
         st.stop()
-    
+
     # Get current conversation title
     current_title = next(
-        (c["title"] for c in st.session_state.conversations 
-         if c["thread_id"] == st.session_state.current_thread_id),
-        "Chat"
+        (
+            c["title"]
+            for c in st.session_state.conversations
+            if c["thread_id"] == st.session_state.current_thread_id
+        ),
+        "Chat",
     )
-    
+
     # Title with edit option
     col1, col2 = st.columns([0.8, 0.2])
     with col1:
@@ -542,15 +586,17 @@ async def main():
     with col2:
         if st.button("Edit Title", key="edit_title"):
             st.session_state.editing_title = True
-    
+
     # Title edit form
     if st.session_state.get("editing_title", False):
         with st.form(key="title_form"):
             new_title = st.text_input("New Title", value=current_title)
             submit = st.form_submit_button("Save")
-            
+
             if submit and new_title:
-                db.update_conversation_title(st.session_state.current_thread_id, new_title)
+                db.update_conversation_title(
+                    st.session_state.current_thread_id, new_title
+                )
 
                 for conv in st.session_state.conversations:
                     if conv["thread_id"] == st.session_state.current_thread_id:
@@ -567,26 +613,22 @@ async def main():
             yield m
 
     await draw_messages(amessage_iter())
-            
+
     user_input = st.chat_input("Type your message...")
-    
+
     if user_input:
         messages.append(ChatMessage(type="human", content=user_input))
         st.chat_message("human").write(user_input)
         message_id = str(uuid.uuid4())
 
-        db.save_message(message_id,
-                        st.session_state.current_thread_id, 
-                        "User", 
-                        user_input
+        db.save_message(
+            message_id, st.session_state.current_thread_id, "User", user_input
         )
-        
+
         st.session_state.messages.append(
-            ChatMessage(type="human", 
-                        content=user_input,
-                        run_id=message_id)
+            ChatMessage(type="human", content=user_input, run_id=message_id)
         )
-        
+
         try:
             if use_streaming:
                 stream = agent_client.astream(
@@ -604,42 +646,45 @@ async def main():
                     thread_id=st.session_state.thread_id,
                     user_id=st.session_state.user_info["id"],
                 )
-                
+
                 messages.append(response)
                 st.chat_message("ai").write(response.content)
-                
+
             print(f"Response: {response}")
             message_id = str(uuid.uuid4())
             db.save_message(
-                message_id,
-                st.session_state.current_thread_id, 
-                "AI", 
-                response.content
+                message_id, st.session_state.current_thread_id, "AI", response.content
             )
-            
-            st.session_state.messages.append({
-                "type": "ai",
-                "content": response.content,
-                "run_id": message_id
-            })
+
+            st.session_state.messages.append(
+                {"type": "ai", "content": response.content, "run_id": message_id}
+            )
 
             current_conversation = next(
-            (c for c in st.session_state.conversations 
-             if c["thread_id"] == st.session_state.current_thread_id), 
-            None
-        )
-        
-            if current_conversation and (current_conversation["title"] == "New Chat" or not current_conversation["title"]):
+                (
+                    c
+                    for c in st.session_state.conversations
+                    if c["thread_id"] == st.session_state.current_thread_id
+                ),
+                None,
+            )
+
+            if current_conversation and (
+                current_conversation["title"] == "New Chat"
+                or not current_conversation["title"]
+            ):
                 # Generate a title (first 30 chars of user message)
                 new_title = user_input[:30] + ("..." if len(user_input) > 30 else "")
-                db.update_conversation_title(st.session_state.current_thread_id, new_title)
-                
+                db.update_conversation_title(
+                    st.session_state.current_thread_id, new_title
+                )
+
                 # Update title in session state
                 for conv in st.session_state.conversations:
                     if conv["thread_id"] == st.session_state.current_thread_id:
                         conv["title"] = new_title
                         break
-                    
+
             st.rerun()  # Clear stale containers
         except AgentClientError as e:
             st.error(f"Error generating response: {e}")
@@ -650,9 +695,10 @@ async def main():
     if len(messages) > 0 and st.session_state.last_message:
         with st.session_state.last_message:
             await handle_feedback()
-    
+
     # Clean up database connection
     db.close()
+
 
 if __name__ == "__main__":
     asyncio.run(main())

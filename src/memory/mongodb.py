@@ -25,7 +25,9 @@ def validate_mongo_config() -> None:
     Raises ValueError if any required configuration is missing.
     """
     required_always = ["MONGO_HOST", "MONGO_PORT", "MONGO_DB"]
-    missing_always = [var for var in required_always if not getattr(settings, var, None)]
+    missing_always = [
+        var for var in required_always if not getattr(settings, var, None)
+    ]
     if missing_always:
         raise ValueError(
             f"Missing required MongoDB configuration: {', '.join(missing_always)}. "

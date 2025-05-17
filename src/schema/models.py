@@ -29,15 +29,11 @@ class AzureOpenAIModelName(StrEnum):
     AZURE_GPT_4O = "azure-gpt-4o"
     AZURE_GPT_4O_MINI = "azure-gpt-4o-mini"
 
+
 class OpenAICompatibleName(StrEnum):
     """https://platform.openai.com/docs/guides/text-generation"""
 
     OPENAI_COMPATIBLE = "openai-compatible"
 
 
-
-AllModelEnum: TypeAlias = (
-    OpenAIModelName
-    | OpenAICompatibleName
-    | AzureOpenAIModelName
-)
+AllModelEnum: TypeAlias = OpenAIModelName | OpenAICompatibleName | AzureOpenAIModelName

@@ -4,12 +4,12 @@ from schema.schema import (
     ChatHistory,
     ChatHistoryInput,
     ChatMessage,
+    Conversation,
     Feedback,
     FeedbackResponse,
     ServiceMetadata,
     StreamInput,
     UserInput,
-    Conversation
 )
 
 __all__ = [

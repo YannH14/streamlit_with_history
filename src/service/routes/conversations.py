@@ -1,19 +1,24 @@
+from typing import Annotated
+
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel, UUID4
-from typing import Annotated, List
-from auth import User, get_current_user 
+from pydantic import UUID4, BaseModel
+
+from auth import User, get_current_user
 
 router = APIRouter(prefix="/conversations", tags=["chat"])
+
 
 class ConversationOut(BaseModel):
     thread_id: UUID4
     title: str
     updated_at: str
 
+
 class ChatMessageOut(BaseModel):
     sender: str
     content: str
     timestamp: str
+
 
 async def _ensure_owner(pool, thread_id: UUID4, user_id: str):
     owner = await pool.fetchval(
@@ -22,7 +27,8 @@ async def _ensure_owner(pool, thread_id: UUID4, user_id: str):
     if owner != user_id:
         raise HTTPException(status_code=403, detail="Not your conversation")
 
-@router.get("", response_model=List[ConversationOut])
+
+@router.get("", response_model=list[ConversationOut])
 async def list_conversations(
     request: Request,
     current_user: Annotated[User, Depends(get_current_user)],
@@ -38,7 +44,8 @@ async def list_conversations(
     )
     return [dict(r) for r in rows]
 
-@router.get("/{thread_id}", response_model=List[ChatMessageOut])
+
+@router.get("/{thread_id}", response_model=list[ChatMessageOut])
 async def get_conversation(
     thread_id: UUID4,
     request: Request,

@@ -14,11 +14,11 @@ from pydantic import (
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from schema.models import (
+    AllModelEnum,
     AzureOpenAIModelName,
+    OpenAICompatibleName,
     OpenAIModelName,
     Provider,
-    OpenAICompatibleName,
-    AllModelEnum
 )
 
 
@@ -93,7 +93,8 @@ class Settings(BaseSettings):
     def model_post_init(self, __context: Any) -> None:
         api_keys = {
             Provider.OPENAI: self.OPENAI_API_KEY,
-            Provider.OPENAI_COMPATIBLE: self.COMPATIBLE_BASE_URL and self.COMPATIBLE_MODEL,
+            Provider.OPENAI_COMPATIBLE: self.COMPATIBLE_BASE_URL
+            and self.COMPATIBLE_MODEL,
             Provider.FAKE: self.USE_FAKE_MODEL,
             Provider.AZURE_OPENAI: self.AZURE_OPENAI_API_KEY,
         }
@@ -130,13 +131,19 @@ class Settings(BaseSettings):
                                 self.AZURE_OPENAI_DEPLOYMENT_MAP
                             )
                         except Exception as e:
-                            raise ValueError(f"Invalid AZURE_OPENAI_DEPLOYMENT_MAP JSON: {e}")
+                            raise ValueError(
+                                f"Invalid AZURE_OPENAI_DEPLOYMENT_MAP JSON: {e}"
+                            )
 
                     # Validate required deployments exist
                     required_models = {"gpt-4o", "gpt-4o-mini"}
-                    missing_models = required_models - set(self.AZURE_OPENAI_DEPLOYMENT_MAP.keys())
+                    missing_models = required_models - set(
+                        self.AZURE_OPENAI_DEPLOYMENT_MAP.keys()
+                    )
                     if missing_models:
-                        raise ValueError(f"Missing required Azure deployments: {missing_models}")
+                        raise ValueError(
+                            f"Missing required Azure deployments: {missing_models}"
+                        )
                 case _:
                     raise ValueError(f"Unknown provider: {provider}")
 

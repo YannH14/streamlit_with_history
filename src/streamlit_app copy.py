@@ -62,7 +62,9 @@ async def main() -> None:
     if "logged_in" not in st.session_state:
         st.session_state.logged_in = False
         st.session_state.username = ""
-        st.session_state.conversations = []    # list of conversations (dicts with id & title)
+        st.session_state.conversations = (
+            []
+        )  # list of conversations (dicts with id & title)
         st.session_state.current_conv_id = None
 
     # Hide the streamlit upper-right chrome
@@ -100,7 +102,7 @@ async def main() -> None:
             st.markdown("The service might be booting up. Try again in a few seconds.")
             st.stop()
     agent_client: AgentClient = st.session_state.agent_client
-    
+
     if "thread_id" not in st.session_state:
         thread_id = st.query_params.get("thread_id")
         if not thread_id:
@@ -108,7 +110,9 @@ async def main() -> None:
             messages = []
         else:
             try:
-                messages: ChatHistory = agent_client.get_history(thread_id=thread_id).messages
+                messages: ChatHistory = agent_client.get_history(
+                    thread_id=thread_id
+                ).messages
             except AgentClientError:
                 st.error("No message history found for this Thread ID.")
                 messages = []
@@ -130,7 +134,9 @@ async def main() -> None:
 
         with st.popover(":material/settings: Settings", use_container_width=True):
             model_idx = agent_client.info.models.index(agent_client.info.default_model)
-            model = st.selectbox("LLM to use", options=agent_client.info.models, index=model_idx)
+            model = st.selectbox(
+                "LLM to use", options=agent_client.info.models, index=model_idx
+            )
             agent_list = [a.key for a in agent_client.info.agents]
             agent_idx = agent_list.index(agent_client.info.default_agent)
             agent_client.agent = st.selectbox(
@@ -165,15 +171,20 @@ async def main() -> None:
         def share_chat_dialog() -> None:
             session = st.runtime.get_instance()._session_mgr.list_active_sessions()[0]
             st_base_url = urllib.parse.urlunparse(
-                [session.client.request.protocol, session.client.request.host, "", "", "", ""]
+                [
+                    session.client.request.protocol,
+                    session.client.request.host,
+                    "",
+                    "",
+                    "",
+                    "",
+                ]
             )
             # if it's not localhost, switch to https by default
             if not st_base_url.startswith("https") and "localhost" not in st_base_url:
                 st_base_url = st_base_url.replace("http", "https")
             # Include both thread_id and user_id in the URL for sharing to maintain user identity
-            chat_url = (
-                f"{st_base_url}?thread_id={st.session_state.thread_id}&{USER_ID_COOKIE}={user_id}"
-            )
+            chat_url = f"{st_base_url}?thread_id={st.session_state.thread_id}&{USER_ID_COOKIE}={user_id}"
             st.markdown(f"**Chat URL:**\n```text\n{chat_url}\n```")
             st.info("Copy the above URL to share or revisit this chat")
 
@@ -345,7 +356,9 @@ async def draw_messages(
                             tool_result: ChatMessage = await anext(messages_agen)
 
                             if tool_result.type != "tool":
-                                st.error(f"Unexpected ChatMessage type: {tool_result.type}")
+                                st.error(
+                                    f"Unexpected ChatMessage type: {tool_result.type}"
+                                )
                                 st.write(tool_result)
                                 st.stop()
 
@@ -397,12 +410,15 @@ async def handle_feedback() -> None:
     # Keep track of last feedback sent to avoid sending duplicates
     if "last_feedback" not in st.session_state:
         st.session_state.last_feedback = (None, None)
-    
+
     latest_run_id = st.session_state.messages[-1].run_id
     feedback = st.feedback("stars", key=latest_run_id)
 
     # If the feedback value or run ID has changed, send a new feedback record
-    if feedback is not None and (latest_run_id, feedback) != st.session_state.last_feedback:
+    if (
+        feedback is not None
+        and (latest_run_id, feedback) != st.session_state.last_feedback
+    ):
         # Normalize the feedback value (an index) to a score between 0 and 1
         normalized_score = (feedback + 1) / 5.0
 

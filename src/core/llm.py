@@ -2,10 +2,12 @@ from functools import cache
 from typing import TypeAlias
 
 from langchain_openai import ChatOpenAI
+
 from core.settings import settings
-from schema.models import AllModelEnum, OpenAICompatibleName
+from schema.models import AllModelEnum
 
 ModelT: TypeAlias = ChatOpenAI
+
 
 @cache
 def get_model(model_name: AllModelEnum, /) -> ModelT:

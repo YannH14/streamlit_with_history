@@ -1,15 +1,18 @@
 # src/auth.py
-from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Depends
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
-bearer_scheme = HTTPBearer(auto_error=False)   # ⬅ no auto 401 – we’ll raise it ourselves
+bearer_scheme = HTTPBearer(auto_error=False)  # ⬅ no auto 401 – we’ll raise it ourselves
+
 
 class User(BaseModel):
     """Minimal user object propagated through request handling."""
+
     id: str
-    username: str | None = None     # optional extras
+    username: str | None = None  # optional extras
     scopes: list[str] = []
+
 
 async def get_current_user(
     creds: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
@@ -26,5 +29,5 @@ async def get_current_user(
         )
 
     # In production you’d verify / decode the token and extract the “sub” (subject) claim.
-    user_id = creds.credentials """       # <- demo shortcut
+    user_id = creds.credentials """  # <- demo shortcut
     return User(id="test")

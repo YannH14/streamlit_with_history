@@ -4,9 +4,10 @@ from uuid import uuid4
 from dotenv import load_dotenv
 from langchain_core.runnables import RunnableConfig
 
+from agents.smol_agents import get_agent
+
 load_dotenv()
 
-from agents.smol_agents import get_agent
 
 agent = get_agent()
 

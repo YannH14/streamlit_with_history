@@ -1,8 +1,12 @@
 # src/core/db.py
-import asyncpg, logging, os
+import logging
+import os
+
+import asyncpg
 from fastapi import FastAPI
 
 logger = logging.getLogger(__name__)
+
 
 async def _connect():
     return await asyncpg.create_pool(
@@ -14,6 +18,7 @@ async def _connect():
         min_size=1,
         max_size=10,
     )
+
 
 def register_events(app: FastAPI) -> None:
     @app.on_event("startup")

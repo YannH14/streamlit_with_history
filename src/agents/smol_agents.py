@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Dict
 
 from smolagents import CodeAgent, InferenceClientModel, OpenAIServerModel
 
@@ -48,7 +47,7 @@ class Agent:
 # ---------------------------------------------------------------------------
 
 
-_AGENTS: Dict[str, Agent] = {}
+_AGENTS: dict[str, Agent] = {}
 
 
 def _create_model():
@@ -68,11 +67,12 @@ def _create_model():
 def _create_agent(description: str) -> CodeAgent:
     model = _create_model()
     tools = []  # plug your domain‑specific tools here
-    return CodeAgent(model=model, 
-                    tools=tools, 
-                    verbosity_level=1,
-                    max_steps=5,
-                    )
+    return CodeAgent(
+        model=model,
+        tools=tools,
+        verbosity_level=1,
+        max_steps=5,
+    )
 
 
 def _register(key: str, description: str):
@@ -91,7 +91,10 @@ _register("command-agent", "A command agent.")
 _register("bg-task-agent", "A background task agent.")
 _register("langgraph-supervisor-agent", "A langgraph supervisor agent.")
 _register("interrupt-agent", "An agent that uses interrupts.")
-_register("knowledge-base-agent", "A retrieval‑augmented generation agent using a Knowledge Base.")
+_register(
+    "knowledge-base-agent",
+    "A retrieval‑augmented generation agent using a Knowledge Base.",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -101,7 +104,9 @@ _register("knowledge-base-agent", "A retrieval‑augmented generation agent usin
 
 def get_agent(agent_id: str) -> CodeAgent:
     if agent_id not in _AGENTS:
-        raise KeyError(f"Unknown agent id '{agent_id}'. Available: {list(_AGENTS)[:5]}…")
+        raise KeyError(
+            f"Unknown agent id '{agent_id}'. Available: {list(_AGENTS)[:5]}…"
+        )
     return _AGENTS[agent_id].agent
 
 
