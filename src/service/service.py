@@ -42,6 +42,7 @@ from schema import (
     ServiceMetadata,
     StreamInput,
     UserInput,
+    Conversation
 )
 
 # Optional AI summariser (non‑critical)
@@ -255,7 +256,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:  # noqa: WPS430 
 
 
 app = FastAPI(lifespan=lifespan)
-router = APIRouter(dependencies=[Depends(verify_bearer)])
+router = APIRouter()
 
 # ---------------------------------------------------------------------
 # Routes: info, conversations
@@ -423,6 +424,68 @@ async def feedback(feedback: Feedback) -> FeedbackResponse:  # noqa: WPS110 – 
     except Exception as exc:  # pragma: no cover
         logger.error("Feedback write failed: %s", exc)
     return FeedbackResponse()
+
+
+@router.get("/conversations/{thread_id}/messages", response_model=list[ChatMessage])
+async def get_conversation_messages(
+    thread_id: UUID,
+    user_id: str = Query(...),
+):
+    """
+    Fetch all chat messages for a conversation, if owned by the user.
+    """
+    if not _DB_POOL:
+        return []
+
+    async with _DB_POOL.acquire() as conn:
+        owner = await conn.fetchval(
+            "SELECT user_id FROM conversations WHERE thread_id=$1", thread_id
+        )
+        if owner is None:
+            # Conversation does not exist (safe to return empty)
+            return []
+        if owner != user_id:
+            raise HTTPException(status_code=403, detail="Not your conversation")
+
+        rows = await conn.fetch(
+            """
+            SELECT sender_type, content, ts
+            FROM chat_messages
+            WHERE thread_id=$1
+            ORDER BY ts
+            """,
+            thread_id,
+        )
+
+    # Map db rows to ChatMessage (tool_calls etc are empty by default)
+    return [
+        ChatMessage(
+            type=row["sender_type"],
+            content=row["content"],
+            # You can add more fields if you store them in DB (currently, only type/content)
+        )
+        for row in rows
+    ]
+
+
+
+@router.post("/conversations", response_model=Conversation)
+async def create_conversation(user_id: str = Query(...)) -> Conversation:
+    """
+    Create an empty conversation for this user.
+    Returns the new thread_id and an (initially empty) title.
+    """
+    new_id = uuid4()
+    if _DB_POOL:
+        async with _DB_POOL.acquire() as conn:
+            # insert a row with an empty title; first user message will upsert title
+            await conn.execute(
+                "INSERT INTO conversations(thread_id, user_id, title) VALUES($1, $2, $3)",
+                new_id,
+                user_id,
+                "",
+            )
+    return Conversation(thread_id=new_id, title="")
 
 
 # ---------------------------------------------------------------------

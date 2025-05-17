@@ -13,7 +13,9 @@ from schema import (
     ServiceMetadata,
     StreamInput,
     UserInput,
+    Conversation,
 )
+
 
 
 class AgentClientError(Exception):
@@ -320,7 +322,7 @@ class AgentClient:
         """
         Create a feedback record for a run.
 
-        This is a simple wrapper for the LangSmith create_feedback API, so the
+        This is a simple wrapper for the LangSmith create_feedback API, so thes
         credentials can be stored and managed in the service rather than the client.
         See: https://api.smith.langchain.com/redoc#tag/feedback/operation/create_feedback_api_v1_feedback_post
         """
@@ -390,3 +392,55 @@ class AgentClient:
             return response.json()
         except httpx.HTTPError as e:
             raise AgentClientError(f"Error getting conversation: {e}")
+        
+    def get_conversations(self, user_id: str) -> list[Conversation]:
+        """
+        List all conversations (thread_id + title) for a given user.
+        """
+        try:
+            resp = httpx.get(
+                f"{self.base_url}/conversations",
+                params={"user_id": user_id},
+                headers=self._headers,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            # Validate each entry as a Conversation
+            return [Conversation.model_validate(d) for d in data]
+        except httpx.HTTPError as e:
+            raise AgentClientError(f"Error listing conversations: {e}")
+
+    def create_conversation(self, user_id: str) -> Conversation:
+        """
+        Create a new, empty conversation row for this user.
+        The backend will assign a UUID and return it (with an empty title).
+        """
+        try:
+            resp = httpx.post(
+                f"{self.base_url}/conversations",
+                params={"user_id": user_id},
+                headers=self._headers,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            return Conversation.model_validate(resp.json())
+        except httpx.HTTPError as e:
+            raise AgentClientError(f"Error creating conversation: {e}")
+
+    def get_messages(self, thread_id: str, user_id: str) -> list[ChatMessage]:
+        """
+        Fetch the full message history for a given conversation.
+        """
+        try:
+            resp = httpx.get(
+                f"{self.base_url}/conversations/{thread_id}/messages",
+                params={"user_id": user_id},
+                headers=self._headers,
+                timeout=self.timeout,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return [ChatMessage.model_validate(m) for m in data]
+        except httpx.HTTPError as e:
+            raise AgentClientError(f"Error fetching messages: {e}")

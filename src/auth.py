@@ -19,12 +19,12 @@ async def get_current_user(
        (Swap in real JWT decoding here when you have it.)
     2. If nothing is supplied we return 401.
     """
-    if creds is None or not creds.credentials:
+    """if creds is None or not creds.credentials:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing or invalid bearer token",
         )
 
     # In production you’d verify / decode the token and extract the “sub” (subject) claim.
-    user_id = creds.credentials        # <- demo shortcut
-    return User(id=user_id)
+    user_id = creds.credentials """       # <- demo shortcut
+    return User(id="test")

@@ -1,243 +1,29 @@
-import asyncio
-import os
-import urllib.parse
-import uuid
-from collections.abc import AsyncGenerator
-
 import streamlit as st
+import sqlite3
+import uuid
+import os
+from datetime import datetime
 from dotenv import load_dotenv
+import asyncio
+from langchain.chat_models import ChatOpenAI
+from langchain.chains import ConversationChain
+from langchain.memory import ConversationBufferMemory
+from client import AgentClient, AgentClientError
+from schema.schema import ChatMessage,ChatHistory
+from schema.task_data import TaskData, TaskDataStatus
+from collections.abc import AsyncGenerator
 from pydantic import ValidationError
 
-from client import AgentClient, AgentClientError
-from schema import ChatHistory, ChatMessage
-from schema.task_data import TaskData, TaskDataStatus
 
-# A Streamlit app for interacting with the langgraph agent via a simple chat interface.
-# The app has three main functions which are all run async:
+# Load environment variables from .env file
+load_dotenv()
 
-# - main() - sets up the streamlit app and high level structure
-# - draw_messages() - draws a set of chat messages - either replaying existing messages
-#   or streaming new ones.
-# - handle_feedback() - Draws a feedback widget and records feedback from the user.
-
-# The app heavily uses AgentClient to interact with the agent's FastAPI endpoints.
-
-
-APP_TITLE = "Agent Service Toolkit"
-APP_ICON = "🧰"
+# Constants
+APP_TITLE = "Chatbot Epargne Demo"
+APP_ICON = "🤖"
 USER_ID_COOKIE = "user_id"
-
-
-def get_or_create_user_id() -> str:
-    """Get the user ID from session state or URL parameters, or create a new one if it doesn't exist."""
-    # Check if user_id exists in session state
-    if USER_ID_COOKIE in st.session_state:
-        return st.session_state[USER_ID_COOKIE]
-
-    # Try to get from URL parameters using the new st.query_params
-    if USER_ID_COOKIE in st.query_params:
-        user_id = st.query_params[USER_ID_COOKIE]
-        st.session_state[USER_ID_COOKIE] = user_id
-        return user_id
-
-    # Generate a new user_id if not found
-    user_id = str(uuid.uuid4())
-
-    # Store in session state for this session
-    st.session_state[USER_ID_COOKIE] = user_id
-
-    # Also add to URL parameters so it can be bookmarked/shared
-    st.query_params[USER_ID_COOKIE] = user_id
-
-    return user_id
-
-
-async def main() -> None:
-    st.set_page_config(
-        page_title=APP_TITLE,
-        page_icon=APP_ICON,
-        menu_items={},
-    )
-
-    # Hide the streamlit upper-right chrome
-    st.html(
-        """
-        <style>
-        [data-testid="stStatusWidget"] {
-                visibility: hidden;
-                height: 0%;
-                position: fixed;
-            }
-        </style>
-        """,
-    )
-    if st.get_option("client.toolbarMode") != "minimal":
-        st.set_option("client.toolbarMode", "minimal")
-        await asyncio.sleep(0.1)
-        st.rerun()
-
-    # Get or create user ID
-    user_id = get_or_create_user_id()
-
-    if "agent_client" not in st.session_state:
-        load_dotenv()
-        agent_url = os.getenv("AGENT_URL")
-        if not agent_url:
-            host = os.getenv("HOST", "0.0.0.0")
-            port = os.getenv("PORT", 8080)
-            agent_url = f"http://{host}:{port}"
-        try:
-            with st.spinner("Connecting to agent service..."):
-                st.session_state.agent_client = AgentClient(base_url=agent_url)
-        except AgentClientError as e:
-            st.error(f"Error connecting to agent service at {agent_url}: {e}")
-            st.markdown("The service might be booting up. Try again in a few seconds.")
-            st.stop()
-    agent_client: AgentClient = st.session_state.agent_client
-
-    if "thread_id" not in st.session_state:
-        thread_id = st.query_params.get("thread_id")
-        if not thread_id:
-            thread_id = str(uuid.uuid4())
-            messages = []
-        else:
-            try:
-                messages: ChatHistory = agent_client.get_history(thread_id=thread_id).messages
-            except AgentClientError:
-                st.error("No message history found for this Thread ID.")
-                messages = []
-        st.session_state.messages = messages
-        st.session_state.thread_id = thread_id
-
-    # Config options
-    with st.sidebar:
-        st.header(f"{APP_ICON} {APP_TITLE}")
-
-        ""
-        "Full toolkit for running an AI agent service built with LangGraph, FastAPI and Streamlit"
-        ""
-
-        if st.button(":material/chat: New Chat", use_container_width=True):
-            st.session_state.messages = []
-            st.session_state.thread_id = str(uuid.uuid4())
-            st.rerun()
-
-        with st.popover(":material/settings: Settings", use_container_width=True):
-            model_idx = agent_client.info.models.index(agent_client.info.default_model)
-            model = st.selectbox("LLM to use", options=agent_client.info.models, index=model_idx)
-            agent_list = [a.key for a in agent_client.info.agents]
-            agent_idx = agent_list.index(agent_client.info.default_agent)
-            agent_client.agent = st.selectbox(
-                "Agent to use",
-                options=agent_list,
-                index=agent_idx,
-            )
-            use_streaming = st.toggle("Stream results", value=True)
-
-            # Display user ID (for debugging or user information)
-            st.text_input("User ID (read-only)", value=user_id, disabled=True)
-
-        @st.dialog("Architecture")
-        def architecture_dialog() -> None:
-            st.image(
-                "https://github.com/JoshuaC215/agent-service-toolkit/blob/main/media/agent_architecture.png?raw=true"
-            )
-            "[View full size on Github](https://github.com/JoshuaC215/agent-service-toolkit/blob/main/media/agent_architecture.png)"
-            st.caption(
-                "App hosted on [Streamlit Cloud](https://share.streamlit.io/) with FastAPI service running in [Azure](https://learn.microsoft.com/en-us/azure/app-service/)"
-            )
-
-        if st.button(":material/schema: Architecture", use_container_width=True):
-            architecture_dialog()
-
-        with st.popover(":material/policy: Privacy", use_container_width=True):
-            st.write(
-                "Prompts, responses and feedback in this app are anonymously recorded and saved to LangSmith for product evaluation and improvement purposes only."
-            )
-
-        @st.dialog("Share/resume chat")
-        def share_chat_dialog() -> None:
-            session = st.runtime.get_instance()._session_mgr.list_active_sessions()[0]
-            st_base_url = urllib.parse.urlunparse(
-                [session.client.request.protocol, session.client.request.host, "", "", "", ""]
-            )
-            # if it's not localhost, switch to https by default
-            if not st_base_url.startswith("https") and "localhost" not in st_base_url:
-                st_base_url = st_base_url.replace("http", "https")
-            # Include both thread_id and user_id in the URL for sharing to maintain user identity
-            chat_url = (
-                f"{st_base_url}?thread_id={st.session_state.thread_id}&{USER_ID_COOKIE}={user_id}"
-            )
-            st.markdown(f"**Chat URL:**\n```text\n{chat_url}\n```")
-            st.info("Copy the above URL to share or revisit this chat")
-
-        if st.button(":material/upload: Share/resume chat", use_container_width=True):
-            share_chat_dialog()
-
-        "[View the source code](https://github.com/JoshuaC215/agent-service-toolkit)"
-        st.caption(
-            "Made with :material/favorite: by [Joshua](https://www.linkedin.com/in/joshua-k-carroll/) in Oakland"
-        )
-
-    # Draw existing messages
-    messages: list[ChatMessage] = st.session_state.messages
-
-    if len(messages) == 0:
-        match agent_client.agent:
-            case "chatbot":
-                WELCOME = "Hello! I'm a simple chatbot. Ask me anything!"
-            case "interrupt-agent":
-                WELCOME = "Hello! I'm an interrupt agent. Tell me your birthday and I will predict your personality!"
-            case "research-assistant":
-                WELCOME = "Hello! I'm an AI-powered research assistant with web search and a calculator. Ask me anything!"
-            case "rag-assistant":
-                WELCOME = """Hello! I'm an AI-powered Company Policy & HR assistant with access to AcmeTech's Employee Handbook.
-                I can help you find information about benefits, remote work, time-off policies, company values, and more. Ask me anything!"""
-            case _:
-                WELCOME = "Hello! I'm an AI agent. Ask me anything!"
-
-        with st.chat_message("ai"):
-            st.write(WELCOME)
-
-    # draw_messages() expects an async iterator over messages
-    async def amessage_iter() -> AsyncGenerator[ChatMessage, None]:
-        for m in messages:
-            yield m
-
-    await draw_messages(amessage_iter())
-
-    # Generate new message if the user provided new input
-    if user_input := st.chat_input():
-        messages.append(ChatMessage(type="human", content=user_input))
-        st.chat_message("human").write(user_input)
-        try:
-            if use_streaming:
-                stream = agent_client.astream(
-                    message=user_input,
-                    model=model,
-                    thread_id=st.session_state.thread_id,
-                    user_id=user_id,
-                )
-                await draw_messages(stream, is_new=True)
-            else:
-                response = await agent_client.ainvoke(
-                    message=user_input,
-                    model=model,
-                    thread_id=st.session_state.thread_id,
-                    user_id=user_id,
-                )
-                messages.append(response)
-                st.chat_message("ai").write(response.content)
-            st.rerun()  # Clear stale containers
-        except AgentClientError as e:
-            st.error(f"Error generating response: {e}")
-            st.stop()
-
-    # If messages have been generated, show feedback widget
-    if len(messages) > 0 and st.session_state.last_message:
-        with st.session_state.last_message:
-            await handle_feedback()
-
+DB_PATH = "chat_database.db"
+API_KEY = os.getenv("OPENAI_API_KEY", "")
 
 async def draw_messages(
     messages_agen: AsyncGenerator[ChatMessage | str, None],
@@ -285,11 +71,21 @@ async def draw_messages(
             streaming_content += msg
             streaming_placeholder.write(streaming_content)
             continue
-        if not isinstance(msg, ChatMessage):
+        
+        if not isinstance(msg, ChatMessage) and not isinstance(msg, dict):
             st.error(f"Unexpected message type: {type(msg)}")
             st.write(msg)
             st.stop()
-
+            
+        if isinstance(msg, dict):
+            # Convert dict to ChatMessage
+            try:
+                msg = ChatMessage.model_validate(msg)
+            except ValidationError:
+                st.error("Unexpected message format received from agent")
+                st.write(msg)
+                st.stop()
+                
         match msg.type:
             # A message from the user, the easiest case
             case "human":
@@ -390,8 +186,10 @@ async def handle_feedback() -> None:
     # Keep track of last feedback sent to avoid sending duplicates
     if "last_feedback" not in st.session_state:
         st.session_state.last_feedback = (None, None)
-    
-    latest_run_id = st.session_state.messages[-1].run_id
+
+    print("Handling feedback...")
+    latest_run_id = st.session_state.messages[-1].get('run_id')
+    print(f"Latest run ID: {latest_run_id}")
     feedback = st.feedback("stars", key=latest_run_id)
 
     # If the feedback value or run ID has changed, send a new feedback record
@@ -414,6 +212,447 @@ async def handle_feedback() -> None:
         st.session_state.last_feedback = (latest_run_id, feedback)
         st.toast("Feedback recorded", icon=":material/reviews:")
 
+
+# Initialize the database
+def init_database():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    # Users table
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        username TEXT UNIQUE,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+    ''')
+    
+    # Conversations table
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS conversations (
+        id TEXT PRIMARY KEY,
+        user_id TEXT,
+        title TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users (id)
+    )
+    ''')
+    
+    # Messages table
+    c.execute('''
+    CREATE TABLE IF NOT EXISTS messages (
+        id TEXT PRIMARY KEY,
+        conversation_id TEXT,
+        sender TEXT,
+        content TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (conversation_id) REFERENCES conversations (id)
+    )
+    ''')
+    
+    conn.commit()
+    conn.close()
+
+# Database operations
+class ChatDatabase:
+    def __init__(self):
+        self.conn = sqlite3.connect(DB_PATH)
+        self.conn.row_factory = sqlite3.Row
+        self.c = self.conn.cursor()
+    
+    def close(self):
+        self.conn.close()
+    
+    def get_or_create_user(self, username):
+        # Check if user exists
+        self.c.execute('SELECT * FROM users WHERE username = ?', (username,))
+        user = self.c.fetchone()
+        
+        if user:
+            return dict(user)
+        
+        # Create new user
+        user_id = str(uuid.uuid4())
+        self.c.execute(
+            'INSERT INTO users (id, username) VALUES (?, ?)',
+            (user_id, username)
+        )
+        self.conn.commit()
+        
+        return {"id": user_id, "username": username}
+    
+    def create_conversation(self, user_id, title="New Chat"):
+        conversation_id = str(uuid.uuid4())
+        now = datetime.now().isoformat()
+        
+        self.c.execute(
+            'INSERT INTO conversations (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)',
+            (conversation_id, user_id, title, now, now)
+        )
+        self.conn.commit()
+        
+        return {
+            "thread_id": conversation_id,
+            "title": title,
+            "created_at": now
+        }
+    
+    def list_conversations(self, user_id):
+        self.c.execute(
+            '''SELECT id as thread_id, title, created_at, updated_at 
+               FROM conversations 
+               WHERE user_id = ? 
+               ORDER BY updated_at DESC''',
+            (user_id,)
+        )
+        
+        return [dict(row) for row in self.c.fetchall()]
+    
+    def get_conversation(self, thread_id, user_id=None):
+        # Verify the conversation belongs to the user if user_id is provided
+        if user_id:
+            self.c.execute(
+                'SELECT user_id FROM conversations WHERE id = ?',
+                (thread_id,)
+            )
+            owner = self.c.fetchone()
+            if not owner or owner['user_id'] != user_id:
+                return None
+        
+        # Get all messages for this conversation
+        self.c.execute(
+            '''SELECT id ,sender, content, created_at 
+               FROM messages 
+               WHERE conversation_id = ? 
+               ORDER BY created_at''',
+            (thread_id,)
+        )
+        
+        return [dict(row) for row in self.c.fetchall()]
+    
+    def save_message(self, message_id,conversation_id, sender, content):
+        now = datetime.now().isoformat()
+        
+        self.c.execute(
+            'INSERT INTO messages (id, conversation_id, sender, content, created_at) VALUES (?, ?, ?, ?, ?)',
+            (message_id, conversation_id, sender, content, now)
+        )
+        
+        # Update the conversation's updated_at timestamp
+        self.c.execute(
+            'UPDATE conversations SET updated_at = ? WHERE id = ?',
+            (now, conversation_id)
+        )
+        
+        self.conn.commit()
+        return message_id
+    
+    def update_conversation_title(self, thread_id, title):
+        self.c.execute(
+            'UPDATE conversations SET title = ? WHERE id = ?',
+            (title, thread_id)
+        )
+        self.conn.commit()
+    
+    def delete_conversation(self, thread_id):
+        # Delete all messages in the conversation
+        self.c.execute('DELETE FROM messages WHERE conversation_id = ?', (thread_id,))
+        
+        # Delete the conversation
+        self.c.execute('DELETE FROM conversations WHERE id = ?', (thread_id,))
+        
+        self.conn.commit()
+
+# Initialize LLM and conversation chain
+def get_llm_chain():
+    llm = ChatOpenAI(api_key=API_KEY)
+    memory = ConversationBufferMemory()
+    return ConversationChain(llm=llm, memory=memory)
+
+# Helper function to convert between UI and database message formats
+def format_message_for_display(msg_dict) -> ChatMessage:
+    # msg_dict comes from your SQLite rows
+    msg_type = "human" if msg_dict["sender"] == "User" else "ai"
+    return ChatMessage(
+        type=msg_type,
+        content=msg_dict["content"],
+        run_id=msg_dict["id"],
+    )
+
+# Streamlit UI
+async def main():
+    # Initialize database
+    init_database()
+    db = ChatDatabase()
+    
+    # Page configuration
+    st.set_page_config(
+        page_title=APP_TITLE,
+        page_icon=APP_ICON,
+        layout="wide",
+    )
+    
+    # Initialize session state variables
+    if "logged_in" not in st.session_state:
+        st.session_state.logged_in = False
+        st.session_state.user_info = None  
+        st.session_state.conversations = []
+        st.session_state.current_thread_id = None
+        st.session_state.messages = []
+        st.session_state.llm_chain = None
+    
+    # Login screen
+    if not st.session_state.logged_in:
+        st.title(f"{APP_ICON} {APP_TITLE}")
+        st.subheader("Login")
+        
+        username = st.text_input("Username")
+        if st.button("Login") and username:
+            # Get or create user record
+            user_info = db.get_or_create_user(username)
+            print(f"User info: {user_info}")
+            # Set session state
+            st.session_state.logged_in = True
+            st.session_state.user_info = user_info
+            st.session_state.conversations = db.list_conversations(user_info["id"])
+            st.session_state.llm_chain = get_llm_chain()
+            
+            st.rerun()
+        
+        st.stop()
+    
+    if "agent_client" not in st.session_state:
+        load_dotenv()
+        agent_url = os.getenv("AGENT_URL")
+        if not agent_url:
+            host = os.getenv("HOST", "0.0.0.0")
+            port = os.getenv("PORT", 8080)
+            agent_url = f"http://{host}:{port}"
+        try:
+            with st.spinner("Connecting to agent service..."):
+                st.session_state.agent_client = AgentClient(base_url=agent_url)
+        except AgentClientError as e:
+            st.error(f"Error connecting to agent service at {agent_url}: {e}")
+            st.markdown("The service might be booting up. Try again in a few seconds.")
+            st.stop()
+            
+    if "thread_id" not in st.session_state:
+            thread_id = st.query_params.get("thread_id")
+            if not thread_id:
+                thread_id = str(uuid.uuid4())
+                messages = []
+            else:
+                try:
+                    messages: ChatHistory = agent_client.get_history(thread_id=thread_id).messages
+                except AgentClientError:
+                    st.error("No message history found for this Thread ID.")
+                    messages = []
+            st.session_state.messages = messages
+            st.session_state.thread_id = thread_id    
+    
+    agent_client: AgentClient = st.session_state.agent_client
+    
+    # Main app layout
+    st.title(f"{APP_ICON} {APP_TITLE}")
+    
+    # Sidebar
+    with st.sidebar:
+        st.header(f"👤 {st.session_state.user_info['username']}")
+        
+        # Logout button
+        if st.button("🚪 Log out", use_container_width=True):
+            for key in ["logged_in", "user_info", "conversations", "current_thread_id", "messages", "llm_chain"]:
+                if key in st.session_state:
+                    del st.session_state[key]
+            st.rerun()
+        
+        # New chat button
+        if st.button("➕ New Chat", use_container_width=True):
+            new_conv = db.create_conversation(st.session_state.user_info["id"])
+            st.session_state.conversations.insert(0, new_conv)
+            st.session_state.current_thread_id = new_conv["thread_id"]
+            st.session_state.messages = []
+            st.session_state.llm_chain = get_llm_chain()  # Reset conversation memory
+            st.rerun()
+            
+        with st.popover(":material/settings: Settings", use_container_width=True):
+            model_idx = agent_client.info.models.index(agent_client.info.default_model)
+            model = st.selectbox("LLM to use", options=agent_client.info.models, index=model_idx)
+            agent_list = [a.key for a in agent_client.info.agents]
+            agent_idx = agent_list.index(agent_client.info.default_agent)
+            agent_client.agent = st.selectbox(
+                "Agent to use",
+                options=agent_list,
+                index=agent_idx,
+            )
+            use_streaming = st.toggle("Stream results", value=True)
+
+            # Display user ID (for debugging or user information)
+            st.text_input("User ID (read-only)", value=st.session_state.user_info["id"], disabled=True)
+        st.divider()
+        
+        # List existing conversationss
+        if st.session_state.conversations:
+            st.subheader("Your Chats")
+            
+            for i, conv in enumerate(st.session_state.conversations):
+                title = conv["title"] or "Untitled Chat"
+                if st.sidebar.button(f"{title}", key=f"convo_{i}", use_container_width=True):
+                    st.session_state.current_thread_id = conv["thread_id"]
+                    messages = db.get_conversation(conv["thread_id"], st.session_state.user_info["id"])
+                    st.session_state.messages = [format_message_for_display(msg) for msg in messages]
+                    st.session_state.llm_chain = get_llm_chain()  # Reset conversation memory
+                    
+                    # Load conversation history into the LLM memory
+                    for msg in messages:
+                        if msg["sender"] == "User":
+                            st.session_state.llm_chain.memory.chat_memory.add_user_message(msg["content"])
+                        else:
+                            st.session_state.llm_chain.memory.chat_memory.add_ai_message(msg["content"])
+                    
+                    st.rerun()
+                
+                # Delete button with confirmation
+                with st.sidebar.expander("Delete", expanded=False):
+                    if st.button("Confirm Delete", key=f"delete_{i}", use_container_width=True):
+                        db.delete_conversation(conv["thread_id"])
+                        st.session_state.conversations.pop(i)
+                        if st.session_state.current_thread_id == conv["thread_id"]:
+                            st.session_state.current_thread_id = None
+                            st.session_state.messages = []
+                        st.rerun()
+    
+    # Main chat area
+    if not st.session_state.current_thread_id:
+        st.info("Select 'New Chat' or choose an existing conversation from the sidebar.")
+        st.stop()
+    
+    # Get current conversation title
+    current_title = next(
+        (c["title"] for c in st.session_state.conversations 
+         if c["thread_id"] == st.session_state.current_thread_id),
+        "Chat"
+    )
+    
+    # Title with edit option
+    col1, col2 = st.columns([0.8, 0.2])
+    with col1:
+        st.subheader(f"💬 {current_title}")
+    with col2:
+        if st.button("Edit Title", key="edit_title"):
+            st.session_state.editing_title = True
+    
+    # Title edit form
+    if st.session_state.get("editing_title", False):
+        with st.form(key="title_form"):
+            new_title = st.text_input("New Title", value=current_title)
+            submit = st.form_submit_button("Save")
+            
+            if submit and new_title:
+                db.update_conversation_title(st.session_state.current_thread_id, new_title)
+
+                for conv in st.session_state.conversations:
+                    if conv["thread_id"] == st.session_state.current_thread_id:
+                        conv["title"] = new_title
+                        break
+                st.session_state.editing_title = False
+                st.rerun()
+
+    messages: list[ChatMessage] = st.session_state.messages
+
+    # Display messages
+    async def amessage_iter() -> AsyncGenerator[ChatMessage, None]:
+        for m in messages:
+            yield m
+
+    await draw_messages(amessage_iter())
+            
+    user_input = st.chat_input("Type your message...")
+    
+    if user_input:
+        messages.append(ChatMessage(type="human", content=user_input))
+        st.chat_message("human").write(user_input)
+        message_id = str(uuid.uuid4())
+
+        db.save_message(message_id,
+                        st.session_state.current_thread_id, 
+                        "User", 
+                        user_input
+        )
+        
+        st.session_state.messages.append(
+            ChatMessage(type="human", 
+                        content=user_input,
+                        run_id=message_id)
+        )
+        
+        try:
+            if use_streaming:
+                stream = agent_client.astream(
+                    message=user_input,
+                    model=model,
+                    thread_id=st.session_state.thread_id,
+                    user_id=st.session_state.user_info["id"],
+                )
+                await draw_messages(stream, is_new=False)
+                response = st.session_state.messages[-1]
+            else:
+                response = await agent_client.ainvoke(
+                    message=user_input,
+                    model=model,
+                    thread_id=st.session_state.thread_id,
+                    user_id=st.session_state.user_info["id"],
+                )
+                
+                messages.append(response)
+                st.chat_message("ai").write(response.content)
+                
+            print(f"Response: {response}")
+            message_id = str(uuid.uuid4())
+            db.save_message(
+                message_id,
+                st.session_state.current_thread_id, 
+                "AI", 
+                response.content
+            )
+            
+            st.session_state.messages.append({
+                "type": "ai",
+                "content": response.content,
+                "run_id": message_id
+            })
+
+            current_conversation = next(
+            (c for c in st.session_state.conversations 
+             if c["thread_id"] == st.session_state.current_thread_id), 
+            None
+        )
+        
+            if current_conversation and (current_conversation["title"] == "New Chat" or not current_conversation["title"]):
+                # Generate a title (first 30 chars of user message)
+                new_title = user_input[:30] + ("..." if len(user_input) > 30 else "")
+                db.update_conversation_title(st.session_state.current_thread_id, new_title)
+                
+                # Update title in session state
+                for conv in st.session_state.conversations:
+                    if conv["thread_id"] == st.session_state.current_thread_id:
+                        conv["title"] = new_title
+                        break
+                    
+            st.rerun()  # Clear stale containers
+        except AgentClientError as e:
+            st.error(f"Error generating response: {e}")
+            st.stop()
+
+    messages: list[ChatMessage] = st.session_state.messages
+
+    if len(messages) > 0 and st.session_state.last_message:
+        with st.session_state.last_message:
+            await handle_feedback()
+    
+    # Clean up database connection
+    db.close()
 
 if __name__ == "__main__":
     asyncio.run(main())

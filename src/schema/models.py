@@ -34,6 +34,8 @@ class OpenAICompatibleName(StrEnum):
 
     OPENAI_COMPATIBLE = "openai-compatible"
 
+
+
 AllModelEnum: TypeAlias = (
     OpenAIModelName
     | OpenAICompatibleName

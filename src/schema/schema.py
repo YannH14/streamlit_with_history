@@ -2,6 +2,7 @@ from typing import Any, Literal, NotRequired
 
 from pydantic import BaseModel, Field, SerializeAsAny
 from typing_extensions import TypedDict
+from uuid import UUID
 
 from schema.models import AllModelEnum, OpenAIModelName
 
@@ -170,6 +171,10 @@ class ChatHistoryInput(BaseModel):
         examples=["847c6285-8fc9-4560-a83f-4e6285809254"],
     )
 
-
+    
+class Conversation(BaseModel):
+    thread_id: UUID
+    title: str
+    
 class ChatHistory(BaseModel):
     messages: list[ChatMessage]
