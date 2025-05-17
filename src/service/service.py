@@ -112,7 +112,7 @@ async def _init_db_pool() -> None:
         _DB_POOL = None
 
 
-async def _close_db_pool() -> None:  # noqa: WPS430 – symmetrical teardown
+async def _close_db_pool() -> None:
     if _DB_POOL:
         await _DB_POOL.close()
 

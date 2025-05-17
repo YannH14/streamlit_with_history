@@ -71,7 +71,7 @@ def _create_agent(description: str) -> CodeAgent:
         model=model,
         tools=tools,
         verbosity_level=1,
-        max_steps=5,
+        max_steps=1,
     )
 
 

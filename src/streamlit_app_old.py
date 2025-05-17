@@ -4,10 +4,10 @@ import urllib.parse
 import uuid
 from collections.abc import AsyncGenerator
 
-import streamlit as st
 from dotenv import load_dotenv
 from pydantic import ValidationError
 
+import streamlit as st
 from client import AgentClient, AgentClientError
 from schema import ChatHistory, ChatMessage
 from schema.task_data import TaskData, TaskDataStatus

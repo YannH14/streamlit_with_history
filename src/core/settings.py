@@ -90,6 +90,8 @@ class Settings(BaseSettings):
         default_factory=dict, description="Map of model names to Azure deployment IDs"
     )
 
+    DB_PATH: str = "chat_database.db"
+
     def model_post_init(self, __context: Any) -> None:
         api_keys = {
             Provider.OPENAI: self.OPENAI_API_KEY,
