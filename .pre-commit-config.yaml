@@ -11,3 +11,12 @@ repos:
     - id: ruff
       args: [ --fix ]
     - id: ruff-format
+
+- repo: local
+  hooks:
+    - id: git-secrets
+      name: git-secrets scan
+      entry: git secrets --scan --recursive
+      language: system
+      require_serial: true
+      stages: [commit, push]
