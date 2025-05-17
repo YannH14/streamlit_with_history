@@ -54,7 +54,7 @@ The repository is structured as follows:
 
    ```sh
    git clone https://github.com/YannH14/streamlit_with_history.git
-   cd agent-service-toolkit
+   cd streamlit_with_history
    ```
 
 2. Set up environment variables:
